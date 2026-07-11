@@ -133,7 +133,7 @@ class _Spin1ChainDMRG:
             "Jz": coupling,
             "D": self.sia_d,
             "E": 0.0,
-            "bc": self.bc,
+            "bc_x": self.bc,
             "bc_MPS": self.bc_MPS,
             "conserve": self.conserve,
         }
