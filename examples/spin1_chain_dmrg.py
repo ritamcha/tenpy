@@ -15,11 +15,17 @@ Run from the root of a TenPy checkout, for example:
 from __future__ import annotations
 
 import argparse
+import csv
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from numbers import Integral, Real
+from pathlib import Path
 
 import numpy as np
+
+
+ZERO_STATE = "0.0"
+STATE_SZ = {"up": 1, ZERO_STATE: 0, "down": -1}
 
 
 def _validate_positive_integer(value: object, name: str) -> int:
@@ -45,6 +51,47 @@ def _validate_choice(value: object, name: str, choices: tuple[str, ...]) -> str:
     if not isinstance(value, str) or value not in choices:
         raise ValueError(f"{name} must be one of {choices}")
     return value
+
+
+def total_sz(product_state: list[str] | tuple[str, ...]) -> int:
+    try:
+        return sum(STATE_SZ[state] for state in product_state)
+    except KeyError as exc:
+        raise ValueError(f"unknown spin-1 product-state label {exc.args[0]!r}") from exc
+
+
+def product_state_for_total_sz(n_sites: int, target_sz: int) -> list[str]:
+    n_sites = _validate_positive_integer(n_sites, "n_sites")
+    if not isinstance(target_sz, Integral):
+        raise ValueError("target_sz must be an integer")
+    target_sz = int(target_sz)
+    if abs(target_sz) > n_sites:
+        raise ValueError("abs(target_sz) cannot exceed n_sites for spin-1 sites")
+
+    state = [ZERO_STATE] * n_sites
+    offset = 0
+    if target_sz > 0:
+        state[0] = "up"
+        offset = 1
+    elif target_sz < 0:
+        state[0] = "down"
+        offset = 1
+
+    for site in range(offset, n_sites - 1, 2):
+        state[site] = "up"
+        state[site + 1] = "down"
+
+    while total_sz(state) < target_sz:
+        index = state.index("down") if "down" in state else state.index(ZERO_STATE)
+        state[index] = ZERO_STATE if state[index] == "down" else "up"
+    while total_sz(state) > target_sz:
+        index = state.index("up") if "up" in state else state.index(ZERO_STATE)
+        state[index] = ZERO_STATE if state[index] == "up" else "down"
+    return state
+
+
+def _copy_mps_for_orthogonalization(psi):
+    return psi.copy() if hasattr(psi, "copy") else psi
 
 
 def _require_tenpy():
@@ -164,12 +211,45 @@ class _Spin1ChainDMRG:
         self,
         dmrg_options: dict[str, object] | None = None,
         product_state: list[str] | tuple[str, ...] | None = None,
+        orthogonal_to: list[object] | None = None,
     ) -> dict[str, object]:
         _, _, dmrg = _require_tenpy()
         model = self.build_model()
         psi = self.build_initial_mps(model=model, product_state=product_state)
-        info = dmrg.run(psi, model, self.dmrg_options(dmrg_options))
+        info = dmrg.run(psi, model, self.dmrg_options(dmrg_options), orthogonal_to=orthogonal_to or [])
         return {"info": info, "psi": psi, "model": model}
+
+    def run_lowest_states(
+        self,
+        num_states: int = 20,
+        target_sz: int = 0,
+        dmrg_options: dict[str, object] | None = None,
+    ) -> list[dict[str, object]]:
+        num_states = _validate_positive_integer(num_states, "num_states")
+        product_state = product_state_for_total_sz(self.n_sites, target_sz)
+        _, _, dmrg = _require_tenpy()
+        model = self.build_model()
+        previous_states = []
+        results = []
+
+        for state_index in range(num_states):
+            psi = self.build_initial_mps(model=model, product_state=product_state)
+            info = dmrg.run(
+                psi,
+                model,
+                self.dmrg_options(dmrg_options),
+                orthogonal_to=list(previous_states),
+            )
+            energy = float(info["E"])
+            results.append({
+                "state_index": state_index,
+                "target_sz": int(target_sz),
+                "energy": energy,
+                "info": info,
+                "psi": psi,
+            })
+            previous_states.append(_copy_mps_for_orthogonalization(psi))
+        return results
 
 
 @dataclass(frozen=True)
@@ -313,6 +393,45 @@ def run_cases(
     return results
 
 
+def write_spectrum_csv(rows: list[dict[str, object]], output_path: str | Path) -> None:
+    fieldnames = ["case", "label", "state_index", "target_sz", "energy"]
+    with Path(output_path).open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows({key: row[key] for key in fieldnames} for row in rows)
+
+
+def run_lowest_state_cases(
+    case: str,
+    n_sites: int,
+    j_iso: float,
+    d: float,
+    bc: str,
+    settings: DMRGSettings,
+    *,
+    num_states: int,
+    target_sz: int,
+) -> list[dict[str, object]]:
+    rows = []
+    for selected_case in _selected_cases(case):
+        model, label = _build_case_model(selected_case, n_sites, j_iso, d, bc, settings)
+        results = model.run_lowest_states(num_states=num_states, target_sz=target_sz)
+        for result in results:
+            row = {
+                "case": selected_case,
+                "label": label,
+                "state_index": result["state_index"],
+                "target_sz": result["target_sz"],
+                "energy": result["energy"],
+            }
+            rows.append(row)
+            print(
+                f"{label}, state {row['state_index']}, Sz={target_sz}: "
+                f"E = {row['energy']:.16f}"
+            )
+    return rows
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-sites", type=int, default=12, help="Number of spin-1 sites.")
@@ -324,6 +443,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--case", choices=("with", "without", "both"), default="both")
     parser.add_argument("--parallel", action="store_true", help="Run with/without SIA cases in separate processes.")
     parser.add_argument("--workers", type=int, default=None, help="Number of worker processes for --parallel.")
+    parser.add_argument("--num-states", type=int, default=1, help="Number of lowest states to calculate per case.")
+    parser.add_argument("--target-sz", type=int, default=0, help="Total Sz sector for --num-states excited-state DMRG.")
+    parser.add_argument(
+        "--spectrum-csv",
+        default="spin1_chain_lowest_states.csv",
+        help="CSV output path used when --num-states is greater than 1.",
+    )
     return parser.parse_args()
 
 
@@ -332,6 +458,21 @@ def main() -> None:
     settings = DMRGSettings(chi_max=args.chi_max, max_sweeps=args.max_sweeps)
     if args.workers is not None:
         _validate_positive_integer(args.workers, "workers")
+    _validate_positive_integer(args.num_states, "num_states")
+    if args.num_states > 1:
+        rows = run_lowest_state_cases(
+            args.case,
+            args.n_sites,
+            args.j,
+            args.d,
+            args.bc,
+            settings,
+            num_states=args.num_states,
+            target_sz=args.target_sz,
+        )
+        write_spectrum_csv(rows, args.spectrum_csv)
+        print(f"Wrote {args.spectrum_csv}")
+        return
     run_cases(
         args.case,
         args.n_sites,
