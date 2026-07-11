@@ -8,6 +8,7 @@ Hamiltonians:
 Run from the root of a TenPy checkout, for example:
 
     python examples/spin1_chain_dmrg.py --n-sites 12 --j -16.1 --d 0.252 --case both
+    python examples/spin1_chain_dmrg.py --n-sites 12 --bc periodic --case both
     python examples/spin1_chain_dmrg.py --n-sites 12 --case both --parallel
 """
 
@@ -113,6 +114,7 @@ class _Spin1ChainDMRG:
 
     n_sites: int
     j_iso: float
+    bc: str
     bc_MPS: str
     conserve: str
     dmrg_settings: DMRGSettings
@@ -131,6 +133,7 @@ class _Spin1ChainDMRG:
             "Jz": coupling,
             "D": self.sia_d,
             "E": 0.0,
+            "bc": self.bc,
             "bc_MPS": self.bc_MPS,
             "conserve": self.conserve,
         }
@@ -176,6 +179,7 @@ class Spin1ChainWithSIA(_Spin1ChainDMRG):
     n_sites: int = 12
     j_iso: float = -16.1
     d: float = 0.252
+    bc: str = "periodic"
     bc_MPS: str = "finite"
     conserve: str = "Sz"
     dmrg_settings: DMRGSettings = DMRGSettings()
@@ -184,6 +188,7 @@ class Spin1ChainWithSIA(_Spin1ChainDMRG):
         object.__setattr__(self, "n_sites", _validate_positive_integer(self.n_sites, "n_sites"))
         object.__setattr__(self, "j_iso", _validate_finite_real(self.j_iso, "j_iso"))
         object.__setattr__(self, "d", _validate_finite_real(self.d, "d"))
+        object.__setattr__(self, "bc", _validate_choice(self.bc, "bc", ("open", "periodic")))
         object.__setattr__(self, "bc_MPS", _validate_choice(self.bc_MPS, "bc_MPS", ("finite", "infinite")))
         object.__setattr__(self, "conserve", _validate_choice(self.conserve, "conserve", ("Sz", "parity", "None")))
         if not isinstance(self.dmrg_settings, DMRGSettings):
@@ -200,6 +205,7 @@ class Spin1ChainWithoutSIA(_Spin1ChainDMRG):
 
     n_sites: int = 12
     j_iso: float = -16.1
+    bc: str = "periodic"
     bc_MPS: str = "finite"
     conserve: str = "Sz"
     dmrg_settings: DMRGSettings = DMRGSettings()
@@ -207,6 +213,7 @@ class Spin1ChainWithoutSIA(_Spin1ChainDMRG):
     def __post_init__(self) -> None:
         object.__setattr__(self, "n_sites", _validate_positive_integer(self.n_sites, "n_sites"))
         object.__setattr__(self, "j_iso", _validate_finite_real(self.j_iso, "j_iso"))
+        object.__setattr__(self, "bc", _validate_choice(self.bc, "bc", ("open", "periodic")))
         object.__setattr__(self, "bc_MPS", _validate_choice(self.bc_MPS, "bc_MPS", ("finite", "infinite")))
         object.__setattr__(self, "conserve", _validate_choice(self.conserve, "conserve", ("Sz", "parity", "None")))
         if not isinstance(self.dmrg_settings, DMRGSettings):
@@ -235,23 +242,31 @@ def _build_case_model(
     n_sites: int,
     j_iso: float,
     d: float,
+    bc: str,
     settings: DMRGSettings,
 ) -> tuple[_Spin1ChainDMRG, str]:
     if case == "with":
         return (
-            Spin1ChainWithSIA(n_sites=n_sites, j_iso=j_iso, d=d, dmrg_settings=settings),
+            Spin1ChainWithSIA(n_sites=n_sites, j_iso=j_iso, d=d, bc=bc, dmrg_settings=settings),
             "with SIA",
         )
     if case == "without":
         return (
-            Spin1ChainWithoutSIA(n_sites=n_sites, j_iso=j_iso, dmrg_settings=settings),
+            Spin1ChainWithoutSIA(n_sites=n_sites, j_iso=j_iso, bc=bc, dmrg_settings=settings),
             "without SIA",
         )
     raise ValueError("case must be one of ('with', 'without')")
 
 
-def _run_case_worker(case: str, n_sites: int, j_iso: float, d: float, settings: DMRGSettings) -> dict[str, object]:
-    model, label = _build_case_model(case, n_sites, j_iso, d, settings)
+def _run_case_worker(
+    case: str,
+    n_sites: int,
+    j_iso: float,
+    d: float,
+    bc: str,
+    settings: DMRGSettings,
+) -> dict[str, object]:
+    model, label = _build_case_model(case, n_sites, j_iso, d, bc, settings)
     result = model.run_dmrg()
     return {
         "case": case,
@@ -266,6 +281,7 @@ def run_cases(
     n_sites: int,
     j_iso: float,
     d: float,
+    bc: str,
     settings: DMRGSettings,
     *,
     parallel: bool = False,
@@ -276,7 +292,7 @@ def run_cases(
         max_workers = workers or len(cases)
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(_run_case_worker, selected_case, n_sites, j_iso, d, settings)
+                executor.submit(_run_case_worker, selected_case, n_sites, j_iso, d, bc, settings)
                 for selected_case in cases
             ]
             results = [future.result() for future in futures]
@@ -286,7 +302,7 @@ def run_cases(
 
     results = []
     for selected_case in cases:
-        model, label = _build_case_model(selected_case, n_sites, j_iso, d, settings)
+        model, label = _build_case_model(selected_case, n_sites, j_iso, d, bc, settings)
         result = run_case(model, label)
         results.append({
             "case": selected_case,
@@ -302,6 +318,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-sites", type=int, default=12, help="Number of spin-1 sites.")
     parser.add_argument("--j", type=float, default=-16.1, help="J in H = -2 J sum_i S_i.S_{i+1}.")
     parser.add_argument("--d", type=float, default=0.252, help="Single-ion anisotropy D.")
+    parser.add_argument("--bc", choices=("open", "periodic"), default="periodic", help="Lattice boundary condition.")
     parser.add_argument("--chi-max", type=int, default=100, help="Maximum MPS bond dimension.")
     parser.add_argument("--max-sweeps", type=int, default=20, help="Maximum number of DMRG sweeps.")
     parser.add_argument("--case", choices=("with", "without", "both"), default="both")
@@ -320,6 +337,7 @@ def main() -> None:
         args.n_sites,
         args.j,
         args.d,
+        args.bc,
         settings,
         parallel=args.parallel,
         workers=args.workers,
