@@ -51,14 +51,14 @@ def _require_tenpy():
     """Return TenPy constructors or explain how to run this script."""
     try:
         from tenpy.algorithms import dmrg
-        from tenpy.models.spins import SpinChain
+        from tenpy.models.spins import SpinModel
         from tenpy.networks.mps import MPS
     except Exception as exc:
         raise RuntimeError(
             "TenPy is unavailable. Run this script from an installed TenPy environment, "
             "for example after `python -m pip install -e .` in the cloned repository."
         ) from exc
-    return SpinChain, MPS, dmrg
+    return SpinModel, MPS, dmrg
 
 
 @dataclass(frozen=True)
@@ -147,8 +147,8 @@ class _Spin1ChainDMRG:
         return [pattern[site % len(pattern)] for site in range(self.n_sites)]
 
     def build_model(self):
-        SpinChain, _, _ = _require_tenpy()
-        return SpinChain(self.tenpy_model_params())
+        SpinModel, _, _ = _require_tenpy()
+        return SpinModel(self.tenpy_model_params())
 
     def build_initial_mps(self, model=None, product_state: list[str] | tuple[str, ...] | None = None):
         _, MPS, _ = _require_tenpy()
