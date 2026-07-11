@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import re
 from pathlib import Path
 from typing import Iterable
@@ -98,9 +99,88 @@ def write_gap_csv(rows: list[dict[str, float | int]], output_path: str | Path) -
         writer.writerows(rows)
 
 
-def plot_gap(rows: list[dict[str, float | int]], output_path: str | Path) -> None:
-    if not rows:
-        raise ValueError("cannot plot an empty gap scan")
+def _scale(value: float, in_min: float, in_max: float, out_min: float, out_max: float) -> float:
+    if in_max == in_min:
+        return 0.5 * (out_min + out_max)
+    return out_min + (value - in_min) * (out_max - out_min) / (in_max - in_min)
+
+
+def _plot_gap_svg(rows: list[dict[str, float | int]], output_path: Path) -> None:
+    width = 760
+    height = 480
+    left = 82
+    right = 24
+    top = 54
+    bottom = 70
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+
+    n_values = [int(row["n_sites"]) for row in rows]
+    gaps = [float(row["gap"]) for row in rows]
+    x_min = min(n_values)
+    x_max = max(n_values)
+    y_min = min(0.0, min(gaps))
+    y_max = max(0.0, max(gaps))
+    if y_min == y_max:
+        padding = abs(y_min) * 0.1 or 1.0
+        y_min -= padding
+        y_max += padding
+    else:
+        padding = 0.08 * (y_max - y_min)
+        y_min -= padding
+        y_max += padding
+
+    points = []
+    for n_sites, gap in zip(n_values, gaps):
+        x = _scale(n_sites, x_min, x_max, left, left + plot_width)
+        y = _scale(gap, y_min, y_max, top + plot_height, top)
+        points.append((x, y))
+
+    y_ticks = [y_min + index * (y_max - y_min) / 4.0 for index in range(5)]
+    polyline = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+    circles = "\n".join(
+        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="4.5" fill="#0f766e" />'
+        for x, y in points
+    )
+    x_labels = "\n".join(
+        (
+            f'<text x="{x:.2f}" y="{height - 34}" text-anchor="middle" '
+            f'font-size="13">{n_sites}</text>'
+        )
+        for (x, _), n_sites in zip(points, n_values)
+    )
+    y_labels = []
+    grid_lines = []
+    for tick in y_ticks:
+        y = _scale(tick, y_min, y_max, top + plot_height, top)
+        y_labels.append(
+            f'<text x="{left - 10}" y="{y + 4:.2f}" text-anchor="end" font-size="12">{tick:.6g}</text>'
+        )
+        grid_lines.append(
+            f'<line x1="{left}" x2="{left + plot_width}" y1="{y:.2f}" y2="{y:.2f}" '
+            'stroke="#d1d5db" stroke-width="1" />'
+        )
+
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <rect width="100%" height="100%" fill="white" />
+  <text x="{width / 2}" y="30" text-anchor="middle" font-size="20" font-family="Arial, sans-serif">{html.escape("SIA energy gap vs chain length")}</text>
+  <g font-family="Arial, sans-serif" fill="#111827">
+    {"".join(grid_lines)}
+    <line x1="{left}" x2="{left}" y1="{top}" y2="{top + plot_height}" stroke="#111827" stroke-width="1.5" />
+    <line x1="{left}" x2="{left + plot_width}" y1="{top + plot_height}" y2="{top + plot_height}" stroke="#111827" stroke-width="1.5" />
+    <polyline points="{polyline}" fill="none" stroke="#0f766e" stroke-width="2.5" />
+    {circles}
+    {"".join(y_labels)}
+    {x_labels}
+    <text x="{left + plot_width / 2}" y="{height - 10}" text-anchor="middle" font-size="15">Number of spin-1 sites, N</text>
+    <text transform="translate(22 {top + plot_height / 2}) rotate(-90)" text-anchor="middle" font-size="15">Gap: E(D=0) - E(D)</text>
+  </g>
+</svg>
+'''
+    output_path.write_text(svg, encoding="utf-8")
+
+
+def _plot_gap_with_matplotlib(rows: list[dict[str, float | int]], output_path: Path) -> None:
     try:
         import matplotlib
 
@@ -108,8 +188,8 @@ def plot_gap(rows: list[dict[str, float | int]], output_path: str | Path) -> Non
         import matplotlib.pyplot as plt
     except Exception as exc:
         raise RuntimeError(
-            "matplotlib is required to save the plot. Install it with "
-            "`python -m pip install matplotlib`."
+            "matplotlib is required for non-SVG plots. Either use a .svg output path "
+            "or install it with `python -m pip install matplotlib`."
         ) from exc
 
     n_values = [int(row["n_sites"]) for row in rows]
@@ -124,6 +204,16 @@ def plot_gap(rows: list[dict[str, float | int]], output_path: str | Path) -> Non
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
+
+
+def plot_gap(rows: list[dict[str, float | int]], output_path: str | Path) -> None:
+    if not rows:
+        raise ValueError("cannot plot an empty gap scan")
+    output_path = Path(output_path)
+    if output_path.suffix.lower() == ".svg":
+        _plot_gap_svg(rows, output_path)
+        return
+    _plot_gap_with_matplotlib(rows, output_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -141,7 +231,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--workers", type=int, default=None, help="Worker processes for --parallel-cases.")
     parser.add_argument("--csv", default="spin1_chain_gap_vs_n.csv", help="Output CSV path.")
-    parser.add_argument("--plot", default="spin1_chain_gap_vs_n.png", help="Output PNG plot path.")
+    parser.add_argument("--plot", default="spin1_chain_gap_vs_n.svg", help="Output plot path. SVG works without matplotlib.")
     return parser.parse_args()
 
 
