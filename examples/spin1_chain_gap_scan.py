@@ -31,7 +31,8 @@ from pathlib import Path
 from spin1_chain_dmrg import DMRGSettings, Spin1ChainWithSIA, Spin1ChainWithoutSIA
 
 
-STATE_SZ = {"up": 1, "0": 0, "down": -1}
+ZERO_STATE = "0.0"
+STATE_SZ = {"up": 1, ZERO_STATE: 0, "down": -1}
 
 
 def parse_n_values(raw_values: str) -> list[int]:
@@ -61,7 +62,7 @@ def total_sz(product_state: list[str] | tuple[str, ...]) -> int:
 def product_state_for_total_sz(n_sites: int, target_sz: int) -> list[str]:
     if abs(target_sz) > n_sites:
         raise ValueError("abs(target_sz) cannot exceed n_sites for spin-1 sites")
-    state = ["0"] * n_sites
+    state = [ZERO_STATE] * n_sites
     offset = 0
     if target_sz > 0:
         state[0] = "up"
@@ -75,11 +76,11 @@ def product_state_for_total_sz(n_sites: int, target_sz: int) -> list[str]:
         state[site + 1] = "down"
 
     while total_sz(state) < target_sz:
-        index = state.index("down") if "down" in state else state.index("0")
-        state[index] = "0" if state[index] == "down" else "up"
+        index = state.index("down") if "down" in state else state.index(ZERO_STATE)
+        state[index] = ZERO_STATE if state[index] == "down" else "up"
     while total_sz(state) > target_sz:
-        index = state.index("up") if "up" in state else state.index("0")
-        state[index] = "0" if state[index] == "up" else "down"
+        index = state.index("up") if "up" in state else state.index(ZERO_STATE)
+        state[index] = ZERO_STATE if state[index] == "up" else "down"
     return state
 
 
