@@ -16,6 +16,8 @@ component requires an excited-state DMRG calculation in the Sz_total=0 sector.
 Run from the root of a TenPy checkout, for example:
 
     python examples/spin1_chain_gap_scan.py --n-sites 6,8,10,12,14,16
+
+The default plot output is a matplotlib PNG file.
 """
 
 from __future__ import annotations
@@ -260,8 +262,8 @@ def _plot_gap_with_matplotlib(rows: list[dict[str, float | int]], output_path: P
         import matplotlib.pyplot as plt
     except Exception as exc:
         raise RuntimeError(
-            "matplotlib is required for non-SVG plots. Either use a .svg output path "
-            "or install it with `python -m pip install matplotlib`."
+            "matplotlib is required for PNG plots. Install it with "
+            "`python -m pip install matplotlib`."
         ) from exc
 
     n_values = [int(row["n_sites"]) for row in rows]
@@ -298,7 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chi-max", type=int, default=100, help="Maximum MPS bond dimension.")
     parser.add_argument("--max-sweeps", type=int, default=20, help="Maximum number of DMRG sweeps.")
     parser.add_argument("--csv", default="spin1_chain_gap_vs_n.csv", help="Output CSV path.")
-    parser.add_argument("--plot", default="spin1_chain_gap_vs_n.svg", help="Output plot path. SVG works without matplotlib.")
+    parser.add_argument("--plot", default="spin1_chain_gap_vs_n.png", help="Output PNG plot path. Requires matplotlib.")
     return parser.parse_args()
 
 
