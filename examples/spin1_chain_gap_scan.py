@@ -2,7 +2,9 @@
 
 This script compares the two Hamiltonians implemented in spin1_chain_dmrg.py:
 
-    with SIA:    H = -2 J sum_i S_i . S_{i+1} + D sum_i (S_i^z)^2
+    with SIA:    H = -2 J sum_i S_i.S_{i+1}
+                    + Dz sum_i (Sz_i)^2
+                    + Dpp sum_i [(Sp_i)^2 + (Sm_i)^2]
     without SIA: H = -2 J sum_i S_i . S_{i+1}
 
 For each Hamiltonian, the plotted spin gap is
@@ -28,11 +30,13 @@ import html
 import re
 from pathlib import Path
 
-from spin1_chain_dmrg import DMRGSettings, Spin1ChainWithSIA, Spin1ChainWithoutSIA
-
-
-ZERO_STATE = "0.0"
-STATE_SZ = {"up": 1, ZERO_STATE: 0, "down": -1}
+from spin1_chain_dmrg import (
+    DMRGSettings,
+    Spin1ChainWithSIA,
+    Spin1ChainWithoutSIA,
+    product_state_for_total_sz,
+    total_sz,
+)
 
 
 def parse_n_values(raw_values: str) -> list[int]:
@@ -52,38 +56,6 @@ def parse_n_values(raw_values: str) -> list[int]:
     return values
 
 
-def total_sz(product_state: list[str] | tuple[str, ...]) -> int:
-    try:
-        return sum(STATE_SZ[state] for state in product_state)
-    except KeyError as exc:
-        raise ValueError(f"unknown spin-1 product-state label {exc.args[0]!r}") from exc
-
-
-def product_state_for_total_sz(n_sites: int, target_sz: int) -> list[str]:
-    if abs(target_sz) > n_sites:
-        raise ValueError("abs(target_sz) cannot exceed n_sites for spin-1 sites")
-    state = [ZERO_STATE] * n_sites
-    offset = 0
-    if target_sz > 0:
-        state[0] = "up"
-        offset = 1
-    elif target_sz < 0:
-        state[0] = "down"
-        offset = 1
-
-    for site in range(offset, n_sites - 1, 2):
-        state[site] = "up"
-        state[site + 1] = "down"
-
-    while total_sz(state) < target_sz:
-        index = state.index("down") if "down" in state else state.index(ZERO_STATE)
-        state[index] = ZERO_STATE if state[index] == "down" else "up"
-    while total_sz(state) > target_sz:
-        index = state.index("up") if "up" in state else state.index(ZERO_STATE)
-        state[index] = ZERO_STATE if state[index] == "up" else "down"
-    return state
-
-
 def run_sector_energy(model: object, target_sz: int) -> float:
     product_state = product_state_for_total_sz(model.n_sites, target_sz)
     result = model.run_dmrg(product_state=product_state)
@@ -93,7 +65,8 @@ def run_sector_energy(model: object, target_sz: int) -> float:
 def run_gap_scan(
     n_values: list[int],
     j_iso: float,
-    d: float,
+    dz: float,
+    dpp: float,
     bc: str,
     settings: DMRGSettings,
 ) -> list[dict[str, float | int]]:
@@ -102,7 +75,8 @@ def run_gap_scan(
         model_with_sia = Spin1ChainWithSIA(
             n_sites=n_sites,
             j_iso=j_iso,
-            d=d,
+            dz=dz,
+            dpp=dpp,
             bc=bc,
             dmrg_settings=settings,
         )
@@ -296,8 +270,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-sites", default="6,8,10,12,14,16", help="Comma/space separated N values.")
     parser.add_argument("--j", type=float, default=-16.1, help="J in H = -2 J sum_i S_i.S_{i+1}.")
-    parser.add_argument("--d", type=float, default=0.252, help="Single-ion anisotropy D.")
-    parser.add_argument("--bc", choices=("open", "periodic"), default="periodic", help="Lattice boundary condition.")
+    parser.add_argument("--dz", type=float, default=0.379, help="Coefficient Dz for sum_i (Sz_i)^2.")
+    parser.add_argument(
+        "--dpp",
+        type=float,
+        default=-0.017,
+        help="Coefficient Dpp for sum_i [(Sp_i)^2 + (Sm_i)^2].",
+    )
+    parser.add_argument("--bc", choices=("open", "periodic"), default="open", help="Lattice boundary condition.")
     parser.add_argument("--chi-max", type=int, default=100, help="Maximum MPS bond dimension.")
     parser.add_argument("--max-sweeps", type=int, default=20, help="Maximum number of DMRG sweeps.")
     parser.add_argument("--csv", default="spin1_chain_gap_vs_n.csv", help="Output CSV path.")
@@ -312,7 +292,8 @@ def main() -> None:
     rows = run_gap_scan(
         n_values=n_values,
         j_iso=args.j,
-        d=args.d,
+        dz=args.dz,
+        dpp=args.dpp,
         bc=args.bc,
         settings=settings,
     )
