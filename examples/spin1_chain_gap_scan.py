@@ -1,13 +1,17 @@
-"""Scan spin-chain sizes and plot the SIA energy gap from TenPy DMRG.
+"""Scan spin-chain sizes and plot triplet-singlet gaps from TenPy DMRG.
 
 This script compares the two Hamiltonians implemented in spin1_chain_dmrg.py:
 
     with SIA:    H = -2 J sum_i S_i . S_{i+1} + D sum_i (S_i^z)^2
     without SIA: H = -2 J sum_i S_i . S_{i+1}
 
-The plotted gap is
+For each Hamiltonian, the plotted spin gap is
 
-    gap(N) = E_without_SIA(N) - E_with_SIA(N)
+    gap(N) = E(Sz_total=1, N) - E(Sz_total=0, N)
+
+This gives one curve with the SIA term and one curve with D=0. With a
+single-ion anisotropy, this targets the Sz=+1 triplet branch; the Sz=0 triplet
+component requires an excited-state DMRG calculation in the Sz_total=0 sector.
 
 Run from the root of a TenPy checkout, for example:
 
@@ -21,9 +25,11 @@ import csv
 import html
 import re
 from pathlib import Path
-from typing import Iterable
 
-from spin1_chain_dmrg import DMRGSettings, run_cases
+from spin1_chain_dmrg import DMRGSettings, Spin1ChainWithSIA, Spin1ChainWithoutSIA
+
+
+STATE_SZ = {"up": 1, "0": 0, "down": -1}
 
 
 def parse_n_values(raw_values: str) -> list[int]:
@@ -43,14 +49,42 @@ def parse_n_values(raw_values: str) -> list[int]:
     return values
 
 
-def _energy_by_case(results: Iterable[dict[str, object]]) -> dict[str, float]:
-    energies = {}
-    for result in results:
-        energies[str(result["case"])] = float(result["energy"])
-    missing = {"with", "without"} - set(energies)
-    if missing:
-        raise RuntimeError(f"DMRG result is missing cases: {sorted(missing)}")
-    return energies
+def total_sz(product_state: list[str] | tuple[str, ...]) -> int:
+    try:
+        return sum(STATE_SZ[state] for state in product_state)
+    except KeyError as exc:
+        raise ValueError(f"unknown spin-1 product-state label {exc.args[0]!r}") from exc
+
+
+def product_state_for_total_sz(n_sites: int, target_sz: int) -> list[str]:
+    if abs(target_sz) > n_sites:
+        raise ValueError("abs(target_sz) cannot exceed n_sites for spin-1 sites")
+    state = ["0"] * n_sites
+    offset = 0
+    if target_sz > 0:
+        state[0] = "up"
+        offset = 1
+    elif target_sz < 0:
+        state[0] = "down"
+        offset = 1
+
+    for site in range(offset, n_sites - 1, 2):
+        state[site] = "up"
+        state[site + 1] = "down"
+
+    while total_sz(state) < target_sz:
+        index = state.index("down") if "down" in state else state.index("0")
+        state[index] = "0" if state[index] == "down" else "up"
+    while total_sz(state) > target_sz:
+        index = state.index("up") if "up" in state else state.index("0")
+        state[index] = "0" if state[index] == "up" else "down"
+    return state
+
+
+def run_sector_energy(model: object, target_sz: int) -> float:
+    product_state = product_state_for_total_sz(model.n_sites, target_sz)
+    result = model.run_dmrg(product_state=product_state)
+    return float(result["info"]["E"])
 
 
 def run_gap_scan(
@@ -59,40 +93,58 @@ def run_gap_scan(
     d: float,
     bc: str,
     settings: DMRGSettings,
-    *,
-    parallel_cases: bool = False,
-    workers: int | None = None,
 ) -> list[dict[str, float | int]]:
     rows = []
     for n_sites in n_values:
-        results = run_cases(
-            "both",
+        model_with_sia = Spin1ChainWithSIA(
             n_sites=n_sites,
             j_iso=j_iso,
             d=d,
             bc=bc,
-            settings=settings,
-            parallel=parallel_cases,
-            workers=workers,
+            dmrg_settings=settings,
         )
-        energies = _energy_by_case(results)
-        gap = energies["without"] - energies["with"]
+        model_without_sia = Spin1ChainWithoutSIA(
+            n_sites=n_sites,
+            j_iso=j_iso,
+            bc=bc,
+            dmrg_settings=settings,
+        )
+        energy_with_sia_sz0 = run_sector_energy(model_with_sia, 0)
+        energy_with_sia_sz1 = run_sector_energy(model_with_sia, 1)
+        energy_without_sia_sz0 = run_sector_energy(model_without_sia, 0)
+        energy_without_sia_sz1 = run_sector_energy(model_without_sia, 1)
+        gap_with_sia = energy_with_sia_sz1 - energy_with_sia_sz0
+        gap_without_sia = energy_without_sia_sz1 - energy_without_sia_sz0
         row = {
             "n_sites": n_sites,
-            "energy_with_sia": energies["with"],
-            "energy_without_sia": energies["without"],
-            "gap": gap,
+            "energy_with_sia_sz0": energy_with_sia_sz0,
+            "energy_with_sia_sz1": energy_with_sia_sz1,
+            "gap_with_sia": gap_with_sia,
+            "energy_without_sia_sz0": energy_without_sia_sz0,
+            "energy_without_sia_sz1": energy_without_sia_sz1,
+            "gap_without_sia": gap_without_sia,
+            "gap_difference": gap_with_sia - gap_without_sia,
         }
         rows.append(row)
         print(
-            f"N={n_sites}: E_with_SIA={energies['with']:.16f}, "
-            f"E_without_SIA={energies['without']:.16f}, gap={gap:.16f}"
+            f"N={n_sites}: gap_with_SIA={gap_with_sia:.16f}, "
+            f"gap_D0={gap_without_sia:.16f}, "
+            f"delta={gap_with_sia - gap_without_sia:.16f}"
         )
     return rows
 
 
 def write_gap_csv(rows: list[dict[str, float | int]], output_path: str | Path) -> None:
-    fieldnames = ["n_sites", "energy_with_sia", "energy_without_sia", "gap"]
+    fieldnames = [
+        "n_sites",
+        "energy_with_sia_sz0",
+        "energy_with_sia_sz1",
+        "gap_with_sia",
+        "energy_without_sia_sz0",
+        "energy_without_sia_sz1",
+        "gap_without_sia",
+        "gap_difference",
+    ]
     with Path(output_path).open("w", newline="", encoding="utf-8") as output:
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
@@ -116,11 +168,15 @@ def _plot_gap_svg(rows: list[dict[str, float | int]], output_path: Path) -> None
     plot_height = height - top - bottom
 
     n_values = [int(row["n_sites"]) for row in rows]
-    gaps = [float(row["gap"]) for row in rows]
+    series = [
+        ("gap_with_sia", "with SIA", "#0f766e"),
+        ("gap_without_sia", "D=0", "#b91c1c"),
+    ]
+    all_gaps = [float(row[key]) for key, _, _ in series for row in rows]
     x_min = min(n_values)
     x_max = max(n_values)
-    y_min = min(0.0, min(gaps))
-    y_max = max(0.0, max(gaps))
+    y_min = min(0.0, min(all_gaps))
+    y_max = max(0.0, max(all_gaps))
     if y_min == y_max:
         padding = abs(y_min) * 0.1 or 1.0
         y_min -= padding
@@ -130,24 +186,40 @@ def _plot_gap_svg(rows: list[dict[str, float | int]], output_path: Path) -> None
         y_min -= padding
         y_max += padding
 
-    points = []
-    for n_sites, gap in zip(n_values, gaps):
-        x = _scale(n_sites, x_min, x_max, left, left + plot_width)
-        y = _scale(gap, y_min, y_max, top + plot_height, top)
-        points.append((x, y))
+    points_by_key = {}
+    for key, _, _ in series:
+        points = []
+        for row in rows:
+            x = _scale(int(row["n_sites"]), x_min, x_max, left, left + plot_width)
+            y = _scale(float(row[key]), y_min, y_max, top + plot_height, top)
+            points.append((x, y))
+        points_by_key[key] = points
 
     y_ticks = [y_min + index * (y_max - y_min) / 4.0 for index in range(5)]
-    polyline = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
-    circles = "\n".join(
-        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="4.5" fill="#0f766e" />'
-        for x, y in points
-    )
+    curve_markup = []
+    for key, _, color in series:
+        polyline = " ".join(f"{x:.2f},{y:.2f}" for x, y in points_by_key[key])
+        circles = "\n".join(
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="4.5" fill="{color}" />'
+            for x, y in points_by_key[key]
+        )
+        curve_markup.append(
+            f'<polyline points="{polyline}" fill="none" stroke="{color}" stroke-width="2.5" />\n{circles}'
+        )
     x_labels = "\n".join(
         (
             f'<text x="{x:.2f}" y="{height - 34}" text-anchor="middle" '
             f'font-size="13">{n_sites}</text>'
         )
-        for (x, _), n_sites in zip(points, n_values)
+        for (x, _), n_sites in zip(points_by_key["gap_with_sia"], n_values)
+    )
+    legend = "\n".join(
+        (
+            f'<line x1="{left + index * 120}" x2="{left + index * 120 + 28}" y1="48" y2="48" '
+            f'stroke="{color}" stroke-width="2.5" />'
+            f'<text x="{left + index * 120 + 36}" y="52" font-size="13">{label}</text>'
+        )
+        for index, (_, label, color) in enumerate(series)
     )
     y_labels = []
     grid_lines = []
@@ -163,17 +235,17 @@ def _plot_gap_svg(rows: list[dict[str, float | int]], output_path: Path) -> None
 
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
   <rect width="100%" height="100%" fill="white" />
-  <text x="{width / 2}" y="30" text-anchor="middle" font-size="20" font-family="Arial, sans-serif">{html.escape("SIA energy gap vs chain length")}</text>
+  <text x="{width / 2}" y="30" text-anchor="middle" font-size="20" font-family="Arial, sans-serif">{html.escape("Triplet-singlet gap vs chain length")}</text>
   <g font-family="Arial, sans-serif" fill="#111827">
+    {legend}
     {"".join(grid_lines)}
     <line x1="{left}" x2="{left}" y1="{top}" y2="{top + plot_height}" stroke="#111827" stroke-width="1.5" />
     <line x1="{left}" x2="{left + plot_width}" y1="{top + plot_height}" y2="{top + plot_height}" stroke="#111827" stroke-width="1.5" />
-    <polyline points="{polyline}" fill="none" stroke="#0f766e" stroke-width="2.5" />
-    {circles}
+    {"".join(curve_markup)}
     {"".join(y_labels)}
     {x_labels}
     <text x="{left + plot_width / 2}" y="{height - 10}" text-anchor="middle" font-size="15">Number of spin-1 sites, N</text>
-    <text transform="translate(22 {top + plot_height / 2}) rotate(-90)" text-anchor="middle" font-size="15">Gap: E(D=0) - E(D)</text>
+    <text transform="translate(22 {top + plot_height / 2}) rotate(-90)" text-anchor="middle" font-size="15">Gap: E(Sz=1) - E(Sz=0)</text>
   </g>
 </svg>
 '''
@@ -193,13 +265,14 @@ def _plot_gap_with_matplotlib(rows: list[dict[str, float | int]], output_path: P
         ) from exc
 
     n_values = [int(row["n_sites"]) for row in rows]
-    gaps = [float(row["gap"]) for row in rows]
 
     fig, ax = plt.subplots(figsize=(6.5, 4.2))
-    ax.plot(n_values, gaps, marker="o", linewidth=1.8)
+    ax.plot(n_values, [float(row["gap_with_sia"]) for row in rows], marker="o", linewidth=1.8, label="with SIA")
+    ax.plot(n_values, [float(row["gap_without_sia"]) for row in rows], marker="s", linewidth=1.8, label="D=0")
     ax.set_xlabel("Number of spin-1 sites, N")
-    ax.set_ylabel("Gap: E(D=0) - E(D)")
-    ax.set_title("SIA energy gap vs chain length")
+    ax.set_ylabel("Gap: E(Sz=1) - E(Sz=0)")
+    ax.set_title("Triplet-singlet gap vs chain length")
+    ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
@@ -224,12 +297,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bc", choices=("open", "periodic"), default="periodic", help="Lattice boundary condition.")
     parser.add_argument("--chi-max", type=int, default=100, help="Maximum MPS bond dimension.")
     parser.add_argument("--max-sweeps", type=int, default=20, help="Maximum number of DMRG sweeps.")
-    parser.add_argument(
-        "--parallel-cases",
-        action="store_true",
-        help="Run the with-SIA and without-SIA DMRG jobs for each N in separate processes.",
-    )
-    parser.add_argument("--workers", type=int, default=None, help="Worker processes for --parallel-cases.")
     parser.add_argument("--csv", default="spin1_chain_gap_vs_n.csv", help="Output CSV path.")
     parser.add_argument("--plot", default="spin1_chain_gap_vs_n.svg", help="Output plot path. SVG works without matplotlib.")
     return parser.parse_args()
@@ -245,8 +312,6 @@ def main() -> None:
         d=args.d,
         bc=args.bc,
         settings=settings,
-        parallel_cases=args.parallel_cases,
-        workers=args.workers,
     )
     write_gap_csv(rows, args.csv)
     plot_gap(rows, args.plot)
