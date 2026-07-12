@@ -1,0 +1,238 @@
+"""Finite-temperature susceptibility for a spin-1 chain using TeNPy purification.
+
+The susceptibility per site is computed from zero-field fluctuations,
+
+    chi(T) = beta / N * (<Mz^2> - <Mz>^2),
+
+where Mz = sum_i Sz_i. The finite-temperature state is generated from a
+purification MPS, following TeNPy's purification example.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+from numbers import Integral, Real
+from pathlib import Path
+
+import numpy as np
+
+from spin1_chain_dmrg import Spin1ChainWithSIA, Spin1ChainWithoutSIA
+
+
+CSV_FIELDNAMES = ["case", "beta", "temperature", "chi", "mz", "mz2", "n_sites"]
+
+
+def _validate_positive_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)
+
+
+def _validate_finite_real(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value):
+        raise ValueError(f"{name} must be a finite real number")
+    return float(value)
+
+
+def _validate_non_negative_real(value: object, name: str) -> float:
+    value = _validate_finite_real(value, name)
+    if value < 0.0:
+        raise ValueError(f"{name} must be non-negative")
+    return value
+
+
+def _validate_positive_real(value: object, name: str) -> float:
+    value = _validate_finite_real(value, name)
+    if value <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _validate_choice(value: object, name: str, choices: tuple[str, ...]) -> str:
+    if not isinstance(value, str) or value not in choices:
+        raise ValueError(f"{name} must be one of {choices}")
+    return value
+
+
+def magnetization_moments(psi) -> tuple[float, float]:
+    """Return total <Mz> and <Mz^2> from a purification MPS."""
+    mz = float(np.sum(psi.expectation_value("Sz")))
+    mz2 = float(np.sum(psi.correlation_function("Sz", "Sz")))
+    return mz, mz2
+
+
+def susceptibility_from_moments(beta: float, n_sites: int, mz: float, mz2: float) -> float:
+    """Return chi per site from total magnetization moments."""
+    beta = _validate_non_negative_real(beta, "beta")
+    n_sites = _validate_positive_integer(n_sites, "n_sites")
+    mz = _validate_finite_real(mz, "mz")
+    mz2 = _validate_finite_real(mz2, "mz2")
+    if beta == 0.0:
+        return 0.0
+    return beta * (mz2 - mz * mz) / n_sites
+
+
+def write_susceptibility_csv(rows: list[dict[str, float | int | str]], output_path: str | Path) -> None:
+    """Write susceptibility rows with stable columns."""
+    with Path(output_path).open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=CSV_FIELDNAMES)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _require_tenpy_purification():
+    """Return TeNPy purification classes or explain how to run this script."""
+    try:
+        from tenpy.algorithms.purification import PurificationTEBD
+        from tenpy.networks.purification_mps import PurificationMPS
+    except Exception as exc:
+        raise RuntimeError(
+            "TeNPy purification is unavailable. Run this script from an installed "
+            "TeNPy environment, for example after `python -m pip install -e .` in "
+            "the cloned ritamcha/tenpy repository."
+        ) from exc
+    return PurificationTEBD, PurificationMPS
+
+
+def _temperature_from_beta(beta: float) -> float:
+    return float("inf") if beta == 0.0 else 1.0 / beta
+
+
+def _measurement_row(case_label: str, beta: float, n_sites: int, psi) -> dict[str, float | int | str]:
+    mz, mz2 = magnetization_moments(psi)
+    return {
+        "case": case_label,
+        "beta": beta,
+        "temperature": _temperature_from_beta(beta),
+        "chi": susceptibility_from_moments(beta, n_sites, mz, mz2),
+        "mz": mz,
+        "mz2": mz2,
+        "n_sites": n_sites,
+    }
+
+
+def run_case_scan(
+    case_label: str,
+    model,
+    beta_max: float,
+    dt: float,
+    chi_max: int,
+    svd_min: float,
+) -> list[dict[str, float | int | str]]:
+    """Cool one model from infinite temperature and return susceptibility rows."""
+    _validate_choice(case_label, "case_label", ("with", "without"))
+    beta_max = _validate_non_negative_real(beta_max, "beta_max")
+    dt = _validate_positive_real(dt, "dt")
+    chi_max = _validate_positive_integer(chi_max, "chi_max")
+    svd_min = _validate_non_negative_real(svd_min, "svd_min")
+
+    PurificationTEBD, PurificationMPS = _require_tenpy_purification()
+    tenpy_model = model.build_model()
+    purification_kwargs = {"bc": tenpy_model.lat.bc_MPS}
+    unit_cell_width = getattr(tenpy_model.lat, "mps_unit_cell_width", None)
+    if unit_cell_width is not None:
+        purification_kwargs["unit_cell_width"] = unit_cell_width
+    psi = PurificationMPS.from_infiniteT(tenpy_model.lat.mps_sites(), **purification_kwargs)
+    options = {
+        "trunc_params": {"chi_max": chi_max, "svd_min": svd_min},
+        "dt": dt,
+        "N_steps": 1,
+    }
+    engine = PurificationTEBD(psi, tenpy_model, options)
+
+    beta = 0.0
+    rows = [_measurement_row(case_label, beta, model.n_sites, psi)]
+    while beta < beta_max:
+        beta += 2.0 * dt
+        engine.run_imaginary(dt)
+        rows.append(_measurement_row(case_label, beta, model.n_sites, psi))
+    return rows
+
+
+def _selected_cases(case: str) -> tuple[str, ...]:
+    _validate_choice(case, "case", ("with", "without", "both"))
+    if case == "both":
+        return ("with", "without")
+    return (case,)
+
+
+def _build_case_model(case: str, n_sites: int, j_iso: float, dz: float, dpp: float, bc: str):
+    if case == "with":
+        return Spin1ChainWithSIA(n_sites=n_sites, j_iso=j_iso, dz=dz, dpp=dpp, bc=bc)
+    if case == "without":
+        return Spin1ChainWithoutSIA(n_sites=n_sites, j_iso=j_iso, bc=bc)
+    raise ValueError("case must be one of ('with', 'without')")
+
+
+def run_susceptibility_scan(
+    case: str,
+    n_sites: int,
+    j_iso: float,
+    dz: float,
+    dpp: float,
+    bc: str,
+    beta_max: float,
+    dt: float,
+    chi_max: int,
+    svd_min: float,
+) -> list[dict[str, float | int | str]]:
+    """Run the requested SIA case or cases and return all susceptibility rows."""
+    n_sites = _validate_positive_integer(n_sites, "n_sites")
+    j_iso = _validate_finite_real(j_iso, "j_iso")
+    dz = _validate_finite_real(dz, "dz")
+    dpp = _validate_finite_real(dpp, "dpp")
+    bc = _validate_choice(bc, "bc", ("open", "periodic"))
+
+    rows = []
+    for selected_case in _selected_cases(case):
+        model = _build_case_model(selected_case, n_sites, j_iso, dz, dpp, bc)
+        rows.extend(run_case_scan(selected_case, model, beta_max, dt, chi_max, svd_min))
+    return rows
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--n-sites", type=int, default=12, help="Number of spin-1 sites.")
+    parser.add_argument("--j", type=float, default=-16.1, help="J in H = -2 J sum_i S_i.S_{i+1}.")
+    parser.add_argument("--dz", type=float, default=0.379, help="Coefficient Dz for sum_i (Sz_i)^2.")
+    parser.add_argument(
+        "--dpp",
+        type=float,
+        default=-0.017,
+        help="Coefficient Dpp for sum_i [(Sp_i)^2 + (Sm_i)^2].",
+    )
+    parser.add_argument("--bc", choices=("open", "periodic"), default="open", help="Lattice boundary condition.")
+    parser.add_argument("--case", choices=("with", "without", "both"), default="with")
+    parser.add_argument("--beta-max", type=float, default=5.0, help="Maximum inverse temperature beta.")
+    parser.add_argument("--dt", type=float, default=0.05, help="Imaginary-time step; beta advances by 2*dt.")
+    parser.add_argument("--chi-max", type=int, default=100, help="Maximum purification bond dimension.")
+    parser.add_argument("--svd-min", type=float, default=1.0e-8, help="Minimum singular value retained.")
+    parser.add_argument(
+        "--csv",
+        default="spin1_chain_susceptibility_vs_temperature.csv",
+        help="Output CSV path.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    rows = run_susceptibility_scan(
+        case=args.case,
+        n_sites=args.n_sites,
+        j_iso=args.j,
+        dz=args.dz,
+        dpp=args.dpp,
+        bc=args.bc,
+        beta_max=args.beta_max,
+        dt=args.dt,
+        chi_max=args.chi_max,
+        svd_min=args.svd_min,
+    )
+    write_susceptibility_csv(rows, args.csv)
+    print(f"Wrote {args.csv}")
+
+
+if __name__ == "__main__":
+    main()
