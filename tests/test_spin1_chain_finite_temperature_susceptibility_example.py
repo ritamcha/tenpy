@@ -76,7 +76,12 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         self.assertEqual(args.case, "with")
         self.assertEqual(args.csv, "spin1_chain_susceptibility_vs_temperature.csv")
 
-    def test_run_case_scan_starts_at_infinite_temperature_and_cools_by_two_dt(self):
+    def test_run_case_scan_uses_mpo_purification_and_cools_by_two_dt(self):
+        class FakeHMPO:
+            def make_U(self, dt, approx):
+                FakeHMPO.calls.append((dt, approx))
+                return f"U({dt},{approx})"
+
         class FakeLat:
             bc_MPS = "finite"
             mps_unit_cell_width = 4
@@ -86,6 +91,7 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
 
         class FakeBuiltModel:
             lat = FakeLat()
+            H_MPO = FakeHMPO()
 
         class FakeModel:
             n_sites = 4
@@ -102,22 +108,28 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
                 FakePurificationMPS.calls.append((sites, kwargs))
                 return FakePsi()
 
-        class FakePurificationTEBD:
-            def __init__(self, psi, model, options):
+        class FakePurificationApplyMPO:
+            def __init__(self, psi, mpo, options):
                 self.psi = psi
-                FakePurificationTEBD.options = options
-                FakePurificationTEBD.steps = []
+                FakePurificationApplyMPO.options = options
+                FakePurificationApplyMPO.initial_mpo = mpo
+                FakePurificationApplyMPO.mpos = []
+                FakePurificationApplyMPO.runs = 0
 
-            def run_imaginary(self, dt):
-                FakePurificationTEBD.steps.append(dt)
+            def init_env(self, mpo):
+                FakePurificationApplyMPO.mpos.append(mpo)
 
+            def run(self):
+                FakePurificationApplyMPO.runs += 1
+
+        FakeHMPO.calls = []
         FakePurificationMPS.calls = []
         moments = [(0.0, 4.0), (0.5, 5.0), (1.0, 6.0)]
 
         with patch.object(
             spin1_chain_ft,
             "_require_tenpy_purification",
-            return_value=(FakePurificationTEBD, FakePurificationMPS),
+            return_value=(FakePurificationApplyMPO, FakePurificationMPS),
             create=True,
         ), patch.object(spin1_chain_ft, "magnetization_moments", side_effect=moments):
             rows = spin1_chain_ft.run_case_scan(
@@ -132,8 +144,16 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         self.assertEqual([row["beta"] for row in rows], [0.0, 0.5, 1.0])
         self.assertEqual([row["temperature"] for row in rows], [float("inf"), 2.0, 1.0])
         self.assertEqual([row["chi"] for row in rows], [0.0, 0.59375, 1.25])
-        self.assertEqual(FakePurificationTEBD.steps, [0.25, 0.25])
-        self.assertEqual(FakePurificationTEBD.options["trunc_params"]["chi_max"], 32)
+        self.assertEqual(FakeHMPO.calls, [(-0.125 - 0.125j, "II"), (-0.125 + 0.125j, "II")])
+        self.assertEqual(FakePurificationApplyMPO.initial_mpo, "U((-0.125-0.125j),II)")
+        self.assertEqual(FakePurificationApplyMPO.mpos, [
+            "U((-0.125-0.125j),II)",
+            "U((-0.125+0.125j),II)",
+            "U((-0.125-0.125j),II)",
+            "U((-0.125+0.125j),II)",
+        ])
+        self.assertEqual(FakePurificationApplyMPO.runs, 4)
+        self.assertEqual(FakePurificationApplyMPO.options["trunc_params"]["chi_max"], 32)
         self.assertEqual(FakePurificationMPS.calls, [
             (["site0", "site1", "site2", "site3"], {"bc": "finite", "unit_cell_width": 4})
         ])
