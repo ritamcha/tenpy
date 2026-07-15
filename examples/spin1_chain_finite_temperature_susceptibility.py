@@ -21,7 +21,18 @@ import numpy as np
 from spin1_chain_dmrg import Spin1ChainWithSIA, Spin1ChainWithoutSIA
 
 
-CSV_FIELDNAMES = ["case", "beta", "temperature", "chi", "mz", "mz2", "n_sites"]
+CSV_FIELDNAMES = [
+    "case",
+    "beta_meV_inv",
+    "temperature_K",
+    "chi_reduced_meV_inv",
+    "chi_molar_m3_per_mol",
+    "g_factor",
+    "mz",
+    "mz2",
+    "n_sites",
+]
+CASE_PLOT_LABELS = {"with": "with SIA", "without": "without SIA"}
 
 K_B_MEV_PER_K = 0.08617333262
 MEV_TO_JOULE = 1.602176634e-22
@@ -132,6 +143,55 @@ def write_susceptibility_csv(rows: list[dict[str, float | int | str]], output_pa
         writer = csv.DictWriter(output, fieldnames=CSV_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _require_matplotlib_pyplot():
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        raise RuntimeError(
+            "Matplotlib is required to write the susceptibility plot. "
+            "Install it with `python -m pip install matplotlib`."
+        ) from exc
+    return plt
+
+
+def write_susceptibility_plot(
+    rows: list[dict[str, float | int | str]],
+    output_path: str | Path,
+) -> None:
+    plt = _require_matplotlib_pyplot()
+    figure, axes = plt.subplots()
+    cases = list(dict.fromkeys(str(row["case"]) for row in rows))
+    for case in cases:
+        points = sorted(
+            (
+                (float(row["temperature_K"]), float(row["chi_molar_m3_per_mol"]))
+                for row in rows
+                if row["case"] == case and np.isfinite(float(row["temperature_K"]))
+            ),
+            key=lambda point: point[0],
+        )
+        if not points:
+            continue
+        axes.plot(
+            [point[0] for point in points],
+            [point[1] for point in points],
+            marker="o",
+            markersize=3,
+            label=CASE_PLOT_LABELS.get(case, case),
+        )
+    axes.set_xlabel("Temperature (K)")
+    axes.set_ylabel("Molar susceptibility (m^3 mol^-1)")
+    axes.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+    axes.grid(True, alpha=0.25)
+    axes.legend()
+    figure.tight_layout()
+    figure.savefig(Path(output_path), dpi=300, bbox_inches="tight")
+    plt.close(figure)
 
 
 def _require_tenpy_purification():

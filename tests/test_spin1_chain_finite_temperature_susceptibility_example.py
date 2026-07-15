@@ -87,12 +87,14 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         self.assertEqual(mz, 0.5)
         self.assertEqual(mz2, 7.2)
 
-    def test_rows_are_written_as_csv(self):
+    def test_rows_are_written_with_unit_bearing_csv_columns(self):
         rows = [{
             "case": "with",
-            "beta": 0.5,
-            "temperature": 2.0,
-            "chi": 1.25,
+            "beta_meV_inv": 0.5,
+            "temperature_K": 23.209036243100163,
+            "chi_reduced_meV_inv": 1.25,
+            "chi_molar_m3_per_mol": 2.0e-6,
+            "g_factor": 2.0,
             "mz": 0.0,
             "mz2": 10.0,
             "n_sites": 8,
@@ -104,8 +106,85 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         finally:
             output.unlink(missing_ok=True)
 
-        self.assertIn("case,beta,temperature,chi,mz,mz2,n_sites", content)
-        self.assertIn("with,0.5,2.0,1.25,0.0,10.0,8", content)
+        self.assertIn(
+            "case,beta_meV_inv,temperature_K,chi_reduced_meV_inv,"
+            "chi_molar_m3_per_mol,g_factor,mz,mz2,n_sites",
+            content,
+        )
+        self.assertIn(
+            f"with,0.5,{rows[0]['temperature_K']},1.25,2e-06,2.0,0.0,10.0,8",
+            content,
+        )
+
+    def test_plot_groups_cases_sorts_temperature_and_saves_png(self):
+        class FakeAxes:
+            def __init__(self):
+                self.plot_calls = []
+                self.xlabel = None
+                self.ylabel = None
+
+            def plot(self, x, y, **kwargs):
+                self.plot_calls.append((list(x), list(y), kwargs))
+
+            def set_xlabel(self, label):
+                self.xlabel = label
+
+            def set_ylabel(self, label):
+                self.ylabel = label
+
+            def ticklabel_format(self, **kwargs):
+                self.tick_format = kwargs
+
+            def legend(self):
+                self.legend_called = True
+
+            def grid(self, *args, **kwargs):
+                self.grid_call = (args, kwargs)
+
+        class FakeFigure:
+            def __init__(self):
+                self.saved = None
+
+            def tight_layout(self):
+                self.tight_layout_called = True
+
+            def savefig(self, output_path, **kwargs):
+                self.saved = (Path(output_path), kwargs)
+
+        class FakePyplot:
+            def __init__(self):
+                self.figure = FakeFigure()
+                self.axes = FakeAxes()
+
+            def subplots(self):
+                return self.figure, self.axes
+
+            def close(self, figure):
+                self.closed = figure
+
+        rows = [
+            {"case": "with", "temperature_K": 1200.0, "chi_molar_m3_per_mol": 1.0e-7},
+            {"case": "with", "temperature_K": 2.0, "chi_molar_m3_per_mol": 4.0e-6},
+            {"case": "without", "temperature_K": 1200.0, "chi_molar_m3_per_mol": 1.2e-7},
+            {"case": "without", "temperature_K": 2.0, "chi_molar_m3_per_mol": 3.8e-6},
+        ]
+        pyplot = FakePyplot()
+        output = Path("susceptibility.png")
+
+        with patch.object(spin1_chain_ft, "_require_matplotlib_pyplot", return_value=pyplot):
+            spin1_chain_ft.write_susceptibility_plot(rows, output)
+
+        self.assertEqual(pyplot.axes.plot_calls[0][0], [2.0, 1200.0])
+        self.assertEqual(pyplot.axes.plot_calls[1][0], [2.0, 1200.0])
+        self.assertEqual(pyplot.axes.xlabel, "Temperature (K)")
+        self.assertEqual(pyplot.axes.ylabel, "Molar susceptibility (m^3 mol^-1)")
+        self.assertEqual(pyplot.figure.saved, (output, {"dpi": 300, "bbox_inches": "tight"}))
+        self.assertIs(pyplot.closed, pyplot.figure)
+
+    def test_missing_matplotlib_error_includes_install_command(self):
+        with patch.dict(sys.modules, {"matplotlib": None}):
+            with self.assertRaisesRegex(RuntimeError, "python -m pip install matplotlib"):
+                spin1_chain_ft._require_matplotlib_pyplot()
 
     def test_default_cli_values(self):
         with patch.object(sys, "argv", ["spin1_chain_finite_temperature_susceptibility.py"]):
