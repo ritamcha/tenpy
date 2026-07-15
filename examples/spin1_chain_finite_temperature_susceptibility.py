@@ -152,33 +152,54 @@ def _temperature_from_beta(beta: float) -> float:
     return float("inf") if beta == 0.0 else 1.0 / beta
 
 
-def _measurement_row(case_label: str, beta: float, n_sites: int, psi) -> dict[str, float | int | str]:
+def _measurement_row(
+    case_label: str,
+    beta_mev_inv: float,
+    temperature_k: float,
+    n_sites: int,
+    psi,
+    g_factor: float,
+) -> dict[str, float | int | str]:
     mz, mz2 = magnetization_moments(psi)
+    chi_reduced = reduced_susceptibility_from_moments(beta_mev_inv, n_sites, mz, mz2)
     return {
         "case": case_label,
-        "beta": beta,
-        "temperature": _temperature_from_beta(beta),
-        "chi": susceptibility_from_moments(beta, n_sites, mz, mz2),
+        "beta_meV_inv": beta_mev_inv,
+        "temperature_K": temperature_k,
+        "chi_reduced_meV_inv": chi_reduced,
+        "chi_molar_m3_per_mol": molar_susceptibility_from_reduced(chi_reduced, g_factor),
+        "g_factor": g_factor,
         "mz": mz,
         "mz2": mz2,
         "n_sites": n_sites,
     }
 
 
+def _mpo_propagators(tenpy_model, segment_dt: float) -> list[object]:
+    return [
+        tenpy_model.H_MPO.make_U(-step * segment_dt, "II")
+        for step in (0.5 + 0.5j, 0.5 - 0.5j)
+    ]
+
+
 def run_case_scan(
     case_label: str,
     model,
-    beta_max: float,
+    temperature_min_k: float,
+    temperature_max_k: float,
+    temperature_points: int,
     dt: float,
     chi_max: int,
     svd_min: float,
+    g_factor: float,
 ) -> list[dict[str, float | int | str]]:
     """Cool one model from infinite temperature and return susceptibility rows."""
     _validate_choice(case_label, "case_label", ("with", "without"))
-    beta_max = _validate_non_negative_real(beta_max, "beta_max")
+    temperatures = temperature_grid_kelvin(temperature_min_k, temperature_max_k, temperature_points)
     dt = _validate_positive_real(dt, "dt")
     chi_max = _validate_positive_integer(chi_max, "chi_max")
     svd_min = _validate_non_negative_real(svd_min, "svd_min")
+    g_factor = _validate_positive_real(g_factor, "g_factor")
 
     PurificationApplyMPO, PurificationMPS = _require_tenpy_purification()
     tenpy_model = model.build_model()
@@ -187,20 +208,35 @@ def run_case_scan(
     if unit_cell_width is not None:
         purification_kwargs["unit_cell_width"] = unit_cell_width
     psi = PurificationMPS.from_infiniteT(tenpy_model.lat.mps_sites(), **purification_kwargs)
-    options = {
-        "trunc_params": {"chi_max": chi_max, "svd_min": svd_min},
-    }
-    Us = [tenpy_model.H_MPO.make_U(-step * dt, "II") for step in (0.5 + 0.5j, 0.5 - 0.5j)]
-    engine = PurificationApplyMPO(psi, Us[0], options)
+    options = {"trunc_params": {"chi_max": chi_max, "svd_min": svd_min}}
 
-    beta = 0.0
-    rows = [_measurement_row(case_label, beta, model.n_sites, psi)]
-    while beta < beta_max:
-        beta += 2.0 * dt
-        for U in Us:
-            engine.init_env(U)
-            engine.run()
-        rows.append(_measurement_row(case_label, beta, model.n_sites, psi))
+    rows = []
+    engine = None
+    current_beta = 0.0
+    for temperature_k in temperatures:
+        target_beta = beta_from_temperature_kelvin(temperature_k)
+        tolerance = 1.0e-12 * max(1.0, target_beta)
+        while target_beta - current_beta > tolerance:
+            beta_increment = min(2.0 * dt, target_beta - current_beta)
+            segment_dt = 0.5 * beta_increment
+            propagators = _mpo_propagators(tenpy_model, segment_dt)
+            if engine is None:
+                engine = PurificationApplyMPO(psi, propagators[0], options)
+            for propagator in propagators:
+                engine.init_env(propagator)
+                engine.run()
+            current_beta += beta_increment
+        current_beta = target_beta
+        rows.append(_measurement_row(
+            case_label,
+            target_beta,
+            temperature_k,
+            model.n_sites,
+            psi,
+            g_factor,
+        ))
+
+    rows.reverse()
     return rows
 
 
@@ -226,10 +262,13 @@ def run_susceptibility_scan(
     dz: float,
     dpp: float,
     bc: str,
-    beta_max: float,
+    temperature_min_k: float,
+    temperature_max_k: float,
+    temperature_points: int,
     dt: float,
     chi_max: int,
     svd_min: float,
+    g_factor: float,
 ) -> list[dict[str, float | int | str]]:
     """Run the requested SIA case or cases and return all susceptibility rows."""
     n_sites = _validate_positive_integer(n_sites, "n_sites")
@@ -237,11 +276,26 @@ def run_susceptibility_scan(
     dz = _validate_finite_real(dz, "dz")
     dpp = _validate_finite_real(dpp, "dpp")
     bc = _validate_choice(bc, "bc", ("open", "periodic"))
+    temperature_grid_kelvin(temperature_min_k, temperature_max_k, temperature_points)
+    dt = _validate_positive_real(dt, "dt")
+    chi_max = _validate_positive_integer(chi_max, "chi_max")
+    svd_min = _validate_non_negative_real(svd_min, "svd_min")
+    g_factor = _validate_positive_real(g_factor, "g_factor")
 
     rows = []
     for selected_case in _selected_cases(case):
         model = _build_case_model(selected_case, n_sites, j_iso, dz, dpp, bc)
-        rows.extend(run_case_scan(selected_case, model, beta_max, dt, chi_max, svd_min))
+        rows.extend(run_case_scan(
+            selected_case,
+            model,
+            temperature_min_k,
+            temperature_max_k,
+            temperature_points,
+            dt,
+            chi_max,
+            svd_min,
+            g_factor,
+        ))
     return rows
 
 

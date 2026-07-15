@@ -114,10 +114,12 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         self.assertEqual(args.case, "with")
         self.assertEqual(args.csv, "spin1_chain_susceptibility_vs_temperature.csv")
 
-    def test_run_case_scan_uses_mpo_purification_and_cools_by_two_dt(self):
+    def test_run_case_scan_reaches_temperature_targets_with_bounded_mpo_steps(self):
         class FakeHMPO:
+            calls = []
+
             def make_U(self, dt, approx):
-                FakeHMPO.calls.append((dt, approx))
+                self.calls.append((dt, approx))
                 return f"U({dt},{approx})"
 
         class FakeLat:
@@ -141,60 +143,72 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
             pass
 
         class FakePurificationMPS:
+            calls = []
+
             @classmethod
             def from_infiniteT(cls, sites, **kwargs):
-                FakePurificationMPS.calls.append((sites, kwargs))
+                cls.calls.append((sites, kwargs))
                 return FakePsi()
 
         class FakePurificationApplyMPO:
+            runs = 0
+            applied_mpos = []
+
             def __init__(self, psi, mpo, options):
                 self.psi = psi
-                FakePurificationApplyMPO.options = options
-                FakePurificationApplyMPO.initial_mpo = mpo
-                FakePurificationApplyMPO.mpos = []
-                FakePurificationApplyMPO.runs = 0
+                self.options = options
+                self.initial_mpo = mpo
 
             def init_env(self, mpo):
-                FakePurificationApplyMPO.mpos.append(mpo)
+                self.applied_mpos.append(mpo)
 
             def run(self):
-                FakePurificationApplyMPO.runs += 1
+                type(self).runs += 1
 
-        FakeHMPO.calls = []
-        FakePurificationMPS.calls = []
-        moments = [(0.0, 4.0), (0.5, 5.0), (1.0, 6.0)]
+        temperature_max_k = spin1_chain_ft.temperature_kelvin_from_beta(0.75)
+        temperature_min_k = spin1_chain_ft.temperature_kelvin_from_beta(1.25)
+        moments = [(0.0, 4.0), (0.0, 8.0)]
 
         with patch.object(
             spin1_chain_ft,
             "_require_tenpy_purification",
             return_value=(FakePurificationApplyMPO, FakePurificationMPS),
-            create=True,
         ), patch.object(spin1_chain_ft, "magnetization_moments", side_effect=moments):
             rows = spin1_chain_ft.run_case_scan(
                 "with",
                 FakeModel(),
-                beta_max=1.0,
+                temperature_min_k=temperature_min_k,
+                temperature_max_k=temperature_max_k,
+                temperature_points=2,
                 dt=0.25,
                 chi_max=32,
                 svd_min=1.0e-7,
+                g_factor=2.0,
             )
 
-        self.assertEqual([row["beta"] for row in rows], [0.0, 0.5, 1.0])
-        self.assertEqual([row["temperature"] for row in rows], [float("inf"), 2.0, 1.0])
-        self.assertEqual([row["chi"] for row in rows], [0.0, 0.59375, 1.25])
-        self.assertEqual(FakeHMPO.calls, [(-0.125 - 0.125j, "II"), (-0.125 + 0.125j, "II")])
-        self.assertEqual(FakePurificationApplyMPO.initial_mpo, "U((-0.125-0.125j),II)")
-        self.assertEqual(FakePurificationApplyMPO.mpos, [
-            "U((-0.125-0.125j),II)",
-            "U((-0.125+0.125j),II)",
-            "U((-0.125-0.125j),II)",
-            "U((-0.125+0.125j),II)",
-        ])
-        self.assertEqual(FakePurificationApplyMPO.runs, 4)
-        self.assertEqual(FakePurificationApplyMPO.options["trunc_params"]["chi_max"], 32)
-        self.assertEqual(FakePurificationMPS.calls, [
-            (["site0", "site1", "site2", "site3"], {"bc": "finite", "unit_cell_width": 4})
-        ])
+        self.assertTrue(np.allclose([row["beta_meV_inv"] for row in rows], [1.25, 0.75]))
+        self.assertTrue(rows[0]["temperature_K"] < rows[1]["temperature_K"])
+        segment_dts = [-2.0 * call[0].real for call in FakeHMPO.calls[::2]]
+        self.assertTrue(np.allclose(segment_dts, [0.25, 0.125, 0.25]))
+        self.assertTrue(all(segment_dt <= 0.25 for segment_dt in segment_dts))
+        self.assertTrue(all(call[1] == "II" for call in FakeHMPO.calls))
+        self.assertEqual(FakePurificationApplyMPO.runs, 6)
+
+    def test_run_case_scan_rejects_invalid_dt_and_g_before_tenpy(self):
+        class FakeModel:
+            n_sites = 4
+
+        with patch.object(spin1_chain_ft, "_require_tenpy_purification") as require_tenpy:
+            with self.assertRaisesRegex(ValueError, "dt must be positive"):
+                spin1_chain_ft.run_case_scan(
+                    "with", FakeModel(), 2.0, 1200.0, 10, 0.0, 32, 1.0e-7, 2.0
+                )
+            with self.assertRaisesRegex(ValueError, "g_factor must be positive"):
+                spin1_chain_ft.run_case_scan(
+                    "with", FakeModel(), 2.0, 1200.0, 10, 0.01, 32, 1.0e-7, 0.0
+                )
+
+        require_tenpy.assert_not_called()
 
     def test_run_susceptibility_scan_expands_both_cases_in_order(self):
         class FakeWithSIA:
@@ -207,16 +221,45 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
 
         calls = []
 
-        def fake_run_case_scan(case_label, model, beta_max, dt, chi_max, svd_min):
-            calls.append((case_label, model.kwargs, beta_max, dt, chi_max, svd_min))
-            return [{"case": case_label, "beta": 0.0, "temperature": float("inf"), "chi": 0.0, "mz": 0.0, "mz2": 0.0, "n_sites": 6}]
+        def fake_run_case_scan(
+            case_label,
+            model,
+            temperature_min_k,
+            temperature_max_k,
+            temperature_points,
+            dt,
+            chi_max,
+            svd_min,
+            g_factor,
+        ):
+            calls.append((
+                case_label,
+                model.kwargs,
+                temperature_min_k,
+                temperature_max_k,
+                temperature_points,
+                dt,
+                chi_max,
+                svd_min,
+                g_factor,
+            ))
+            return [{
+                "case": case_label,
+                "beta_meV_inv": 1.0,
+                "temperature_K": spin1_chain_ft.temperature_kelvin_from_beta(1.0),
+                "chi_reduced_meV_inv": 1.0,
+                "chi_molar_m3_per_mol": spin1_chain_ft.molar_susceptibility_from_reduced(1.0, g_factor),
+                "g_factor": g_factor,
+                "mz": 0.0,
+                "mz2": 4.0,
+                "n_sites": 4,
+            }]
 
-        with patch.object(spin1_chain_ft, "Spin1ChainWithSIA", FakeWithSIA, create=True), patch.object(
+        with patch.object(spin1_chain_ft, "Spin1ChainWithSIA", FakeWithSIA), patch.object(
             spin1_chain_ft,
             "Spin1ChainWithoutSIA",
             FakeWithoutSIA,
-            create=True,
-        ), patch.object(spin1_chain_ft, "run_case_scan", side_effect=fake_run_case_scan, create=True):
+        ), patch.object(spin1_chain_ft, "run_case_scan", side_effect=fake_run_case_scan):
             rows = spin1_chain_ft.run_susceptibility_scan(
                 case="both",
                 n_sites=6,
@@ -224,10 +267,13 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
                 dz=0.379,
                 dpp=-0.017,
                 bc="periodic",
-                beta_max=2.0,
-                dt=0.1,
+                temperature_min_k=2.0,
+                temperature_max_k=1200.0,
+                temperature_points=150,
+                dt=0.01,
                 chi_max=64,
                 svd_min=1.0e-8,
+                g_factor=2.1,
             )
 
         self.assertEqual([row["case"] for row in rows], ["with", "without"])
@@ -235,6 +281,7 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         self.assertEqual(calls[0][1]["dz"], 0.379)
         self.assertEqual(calls[0][1]["dpp"], -0.017)
         self.assertEqual(calls[1][1]["bc"], "periodic")
+        self.assertEqual(calls[0][2:], (2.0, 1200.0, 150, 0.01, 64, 1.0e-8, 2.1))
 
 
 if __name__ == "__main__":
