@@ -275,9 +275,10 @@ def run_case_scan(
     current_beta = 0.0
     for temperature_k in temperatures:
         target_beta = beta_from_temperature_kelvin(temperature_k)
-        tolerance = 1.0e-12 * max(1.0, target_beta)
-        while target_beta - current_beta > tolerance:
-            beta_increment = min(2.0 * dt, target_beta - current_beta)
+        while current_beta < target_beta:
+            previous_beta = current_beta
+            remaining_beta = target_beta - previous_beta
+            beta_increment = min(2.0 * dt, remaining_beta)
             segment_dt = 0.5 * beta_increment
             propagators = _mpo_propagators(tenpy_model, segment_dt)
             if engine is None:
@@ -285,8 +286,12 @@ def run_case_scan(
             for propagator in propagators:
                 engine.init_env(propagator)
                 engine.run()
-            current_beta += beta_increment
-        current_beta = target_beta
+            if beta_increment == remaining_beta:
+                current_beta = target_beta
+            else:
+                current_beta = previous_beta + beta_increment
+                if current_beta <= previous_beta:
+                    raise RuntimeError("beta evolution did not make numerical progress")
         rows.append(_measurement_row(
             case_label,
             target_beta,
@@ -362,13 +367,13 @@ def run_susceptibility_scan(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-sites", type=int, default=12, help="Number of spin-1 sites.")
-    parser.add_argument("--j", type=float, default=-16.1, help="J in H = -2 J sum_i S_i.S_{i+1}.")
-    parser.add_argument("--dz", type=float, default=0.379, help="Coefficient Dz for sum_i (Sz_i)^2.")
+    parser.add_argument("--j", type=float, default=-16.1, help="J in meV for H = -2 J sum_i S_i.S_{i+1}.")
+    parser.add_argument("--dz", type=float, default=0.379, help="Coefficient Dz in meV for sum_i (Sz_i)^2.")
     parser.add_argument(
         "--dpp",
         type=float,
         default=-0.017,
-        help="Coefficient Dpp for sum_i [(Sp_i)^2 + (Sm_i)^2].",
+        help="Coefficient Dpp in meV for sum_i [(Sp_i)^2 + (Sm_i)^2].",
     )
     parser.add_argument("--bc", choices=("open", "periodic"), default="open", help="Lattice boundary condition.")
     parser.add_argument("--case", choices=("with", "without", "both"), default="with")

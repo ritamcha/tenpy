@@ -1,6 +1,8 @@
 import importlib.util
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,7 +22,7 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
     def test_temperature_beta_round_trip_uses_mev_and_kelvin(self):
         beta = spin1_chain_ft.beta_from_temperature_kelvin(500.0)
 
-        self.assertAlmostEqual(beta, 1.0 / (spin1_chain_ft.K_B_MEV_PER_K * 500.0), places=14)
+        self.assertAlmostEqual(beta, 0.02320903624349117, delta=5.0e-17)
         self.assertAlmostEqual(spin1_chain_ft.temperature_kelvin_from_beta(beta), 500.0, places=12)
 
     def test_temperature_grid_is_logarithmic_and_descending(self):
@@ -45,14 +47,8 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
     def test_molar_susceptibility_uses_si_prefactor_and_g_squared(self):
         chi_g2 = spin1_chain_ft.molar_susceptibility_from_reduced(1.0, g_factor=2.0)
         chi_g4 = spin1_chain_ft.molar_susceptibility_from_reduced(1.0, g_factor=4.0)
-        expected = (
-            spin1_chain_ft.VACUUM_PERMEABILITY
-            * spin1_chain_ft.AVOGADRO_CONSTANT
-            * (2.0 * spin1_chain_ft.BOHR_MAGNETON_J_PER_T) ** 2
-            / spin1_chain_ft.MEV_TO_JOULE
-        )
 
-        self.assertAlmostEqual(chi_g2, expected, places=18)
+        self.assertAlmostEqual(chi_g2, 1.6249705324481475e-6, delta=5.0e-21)
         self.assertAlmostEqual(chi_g4 / chi_g2, 4.0, places=14)
 
     def test_physical_unit_helpers_reject_invalid_inputs(self):
@@ -198,6 +194,18 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         self.assertEqual(args.csv, "spin1_chain_susceptibility_vs_temperature.csv")
         self.assertEqual(args.plot, "spin1_chain_susceptibility_vs_temperature.png")
 
+    def test_cli_help_identifies_hamiltonian_energy_units_as_mev(self):
+        output = StringIO()
+
+        with redirect_stdout(output), self.assertRaises(SystemExit) as exit_context:
+            spin1_chain_ft.parse_args(["--help"])
+
+        self.assertEqual(exit_context.exception.code, 0)
+        help_text = output.getvalue()
+        self.assertIn("J in meV", help_text)
+        self.assertIn("Coefficient Dz in meV", help_text)
+        self.assertIn("Coefficient Dpp in meV", help_text)
+
     def test_legacy_beta_max_sets_low_temperature_endpoint(self):
         args = spin1_chain_ft.parse_args(["--beta-max", "5.0"])
 
@@ -341,6 +349,89 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         self.assertTrue(all(segment_dt <= 0.25 for segment_dt in segment_dts))
         self.assertTrue(all(call[1] == "II" for call in FakeHMPO.calls))
         self.assertEqual(FakePurificationApplyMPO.runs, 6)
+
+    def test_run_case_scan_evolves_close_positive_temperature_increment(self):
+        class FakeHMPO:
+            calls = []
+
+            def make_U(self, dt, approx):
+                self.calls.append((dt, approx))
+                return f"U({dt},{approx})"
+
+        class FakeLat:
+            bc_MPS = "finite"
+
+            def mps_sites(self):
+                return ["site0", "site1"]
+
+        class FakeBuiltModel:
+            lat = FakeLat()
+            H_MPO = FakeHMPO()
+
+        class FakeModel:
+            n_sites = 2
+
+            def build_model(self):
+                return FakeBuiltModel()
+
+        class FakePsi:
+            pass
+
+        class FakePurificationMPS:
+            @classmethod
+            def from_infiniteT(cls, sites, **kwargs):
+                return FakePsi()
+
+        class FakePurificationApplyMPO:
+            runs = 0
+
+            def __init__(self, psi, mpo, options):
+                self.psi = psi
+
+            def init_env(self, mpo):
+                pass
+
+            def run(self):
+                type(self).runs += 1
+
+        temperature_max_k = 1200.0
+        temperature_min_k = 1199.9999999
+        target_betas = [
+            spin1_chain_ft.beta_from_temperature_kelvin(temperature_max_k),
+            spin1_chain_ft.beta_from_temperature_kelvin(temperature_min_k),
+        ]
+        self.assertGreater(target_betas[1] - target_betas[0], 0.0)
+
+        with patch.object(
+            spin1_chain_ft,
+            "_require_tenpy_purification",
+            return_value=(FakePurificationApplyMPO, FakePurificationMPS),
+        ), patch.object(
+            spin1_chain_ft,
+            "magnetization_moments",
+            side_effect=[(0.0, 2.0), (0.0, 2.0)],
+        ):
+            spin1_chain_ft.run_case_scan(
+                "with",
+                FakeModel(),
+                temperature_min_k=temperature_min_k,
+                temperature_max_k=temperature_max_k,
+                temperature_points=2,
+                dt=0.01,
+                chi_max=32,
+                svd_min=1.0e-7,
+                g_factor=2.0,
+            )
+
+        half_steps = [-2.0 * call[0].real for call in FakeHMPO.calls[::2]]
+        self.assertEqual(len(half_steps), 2)
+        self.assertGreater(half_steps[1], 0.0)
+        self.assertAlmostEqual(
+            half_steps[1],
+            0.5 * (target_betas[1] - target_betas[0]),
+            delta=1.0e-18,
+        )
+        self.assertEqual(FakePurificationApplyMPO.runs, 4)
 
     def test_run_case_scan_rejects_invalid_dt_and_g_before_tenpy(self):
         class FakeModel:
