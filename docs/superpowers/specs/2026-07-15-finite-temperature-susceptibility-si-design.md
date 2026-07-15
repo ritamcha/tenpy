@@ -9,7 +9,7 @@ explicit physical units:
 - Hamiltonian parameters `J`, `Dz`, and `Dpp` are interpreted in meV.
 - Temperature is requested and reported in K.
 - Susceptibility is reported as SI molar susceptibility in `m^3/mol`.
-- The default finite-temperature range is 2 K through 500 K.
+- The default finite-temperature range is 2 K through 1200 K.
 - The script writes both a CSV data file and a headless PNG plot.
 
 The existing purification calculation and spin-1 Hamiltonian definitions stay
@@ -58,10 +58,16 @@ positive. This is the z-axis factor because the calculation uses total `Sz`.
 The user-facing grid is independent of the imaginary-time integration step:
 
 - `--temperature-min-k`: default 2.0 K.
-- `--temperature-max-k`: default 500.0 K.
-- `--temperature-points`: default 100.
+- `--temperature-max-k`: default 1200.0 K.
+- `--temperature-points`: default 150.
 - `--dt`: default 0.01 `meV^-1`; this is the maximum half-step used by the
   purification evolution, not a temperature-axis bound.
+
+For the default `J=-16.1 meV` Hamiltonian, the bond coefficient `2 * abs(J)`
+corresponds to about 374 K. The 1200 K default is a little more than three
+times that exchange scale, allowing the plot to show the approach toward the
+high-temperature regime without treating the exchange scale as a transition
+temperature.
 
 Generate `temperature_points` logarithmically spaced target temperatures from
 the maximum down to the minimum. Convert these targets to increasing beta and
@@ -125,7 +131,7 @@ The plotting helper will:
 - fail with a concise installation instruction if Matplotlib is unavailable.
 
 The plot contains calculated points only. It does not extrapolate or
-interpolate beyond the requested 2-500 K default range.
+interpolate beyond the requested 2-1200 K default range.
 
 ## Code Boundaries
 
@@ -161,7 +167,7 @@ with focused tests that verify:
 - CSV headers and values use the explicit unit-bearing names;
 - the headless plotting path groups cases, sorts temperatures, labels axes,
   and saves the requested file;
-- CLI defaults are 2 K, 500 K, 100 points, `dt=0.01`, and `g=2.0`; and
+- CLI defaults are 2 K, 1200 K, 150 points, `dt=0.01`, and `g=2.0`; and
 - the deprecated `--beta-max` path works while conflicting bounds fail.
 
 Use fakes for TeNPy purification classes and the plotting boundary where
@@ -170,8 +176,8 @@ before publishing the implementation.
 
 ## Acceptance Criteria
 
-A default run produces a CSV and PNG containing 100 calculated temperatures
-from 2 K through 500 K. The plotted y-axis and primary CSV susceptibility are
+A default run produces a CSV and PNG containing 150 calculated temperatures
+from 2 K through 1200 K. The plotted y-axis and primary CSV susceptibility are
 SI molar susceptibility in `m^3/mol`, calculated with the requested g-factor.
 Changing the temperature range does not require manually deriving `dt`, and
 changing `dt` changes the maximum integration step, numerical accuracy, and
