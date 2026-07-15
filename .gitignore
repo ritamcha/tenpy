@@ -32,3 +32,4 @@ coverage.*
 .ipynb_checkpoints
 *.ipynb
 *.pkl
+.worktrees/
