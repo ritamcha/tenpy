@@ -23,6 +23,12 @@ from spin1_chain_dmrg import Spin1ChainWithSIA, Spin1ChainWithoutSIA
 
 CSV_FIELDNAMES = ["case", "beta", "temperature", "chi", "mz", "mz2", "n_sites"]
 
+K_B_MEV_PER_K = 0.08617333262
+MEV_TO_JOULE = 1.602176634e-22
+VACUUM_PERMEABILITY = 1.25663706127e-6
+AVOGADRO_CONSTANT = 6.02214076e23
+BOHR_MAGNETON_J_PER_T = 9.2740100657e-24
+
 
 def _validate_positive_integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
@@ -48,6 +54,52 @@ def _validate_positive_real(value: object, name: str) -> float:
     if value <= 0.0:
         raise ValueError(f"{name} must be positive")
     return value
+
+
+def beta_from_temperature_kelvin(temperature_k: float) -> float:
+    temperature_k = _validate_positive_real(temperature_k, "temperature_k")
+    return 1.0 / (K_B_MEV_PER_K * temperature_k)
+
+
+def temperature_kelvin_from_beta(beta_mev_inv: float) -> float:
+    beta_mev_inv = _validate_positive_real(beta_mev_inv, "beta_mev_inv")
+    return 1.0 / (K_B_MEV_PER_K * beta_mev_inv)
+
+
+def temperature_grid_kelvin(minimum_k: float, maximum_k: float, points: int) -> list[float]:
+    minimum_k = _validate_positive_real(minimum_k, "minimum_k")
+    maximum_k = _validate_positive_real(maximum_k, "maximum_k")
+    points = _validate_positive_integer(points, "points")
+    if maximum_k <= minimum_k:
+        raise ValueError("maximum_k must be greater than minimum_k")
+    if points < 2:
+        raise ValueError("points must be at least 2")
+    return [float(value) for value in np.geomspace(maximum_k, minimum_k, points)]
+
+
+def reduced_susceptibility_from_moments(
+    beta_mev_inv: float,
+    n_sites: int,
+    mz: float,
+    mz2: float,
+) -> float:
+    beta_mev_inv = _validate_positive_real(beta_mev_inv, "beta_mev_inv")
+    n_sites = _validate_positive_integer(n_sites, "n_sites")
+    mz = _validate_finite_real(mz, "mz")
+    mz2 = _validate_finite_real(mz2, "mz2")
+    return beta_mev_inv * (mz2 - mz * mz) / n_sites
+
+
+def molar_susceptibility_from_reduced(chi_reduced_mev_inv: float, g_factor: float) -> float:
+    chi_reduced_mev_inv = _validate_finite_real(chi_reduced_mev_inv, "chi_reduced_mev_inv")
+    g_factor = _validate_positive_real(g_factor, "g_factor")
+    prefactor = (
+        VACUUM_PERMEABILITY
+        * AVOGADRO_CONSTANT
+        * (g_factor * BOHR_MAGNETON_J_PER_T) ** 2
+        / MEV_TO_JOULE
+    )
+    return prefactor * chi_reduced_mev_inv
 
 
 def _validate_choice(value: object, name: str, choices: tuple[str, ...]) -> str:

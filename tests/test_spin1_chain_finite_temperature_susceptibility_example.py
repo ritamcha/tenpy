@@ -17,15 +17,53 @@ SPEC.loader.exec_module(spin1_chain_ft)
 
 
 class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
-    def test_susceptibility_uses_total_magnetization_fluctuations(self):
-        chi = spin1_chain_ft.susceptibility_from_moments(beta=2.0, n_sites=4, mz=1.0, mz2=5.0)
+    def test_temperature_beta_round_trip_uses_mev_and_kelvin(self):
+        beta = spin1_chain_ft.beta_from_temperature_kelvin(500.0)
+
+        self.assertAlmostEqual(beta, 1.0 / (spin1_chain_ft.K_B_MEV_PER_K * 500.0), places=14)
+        self.assertAlmostEqual(spin1_chain_ft.temperature_kelvin_from_beta(beta), 500.0, places=12)
+
+    def test_temperature_grid_is_logarithmic_and_descending(self):
+        temperatures = spin1_chain_ft.temperature_grid_kelvin(2.0, 1200.0, 5)
+
+        self.assertEqual(len(temperatures), 5)
+        self.assertAlmostEqual(temperatures[0], 1200.0)
+        self.assertAlmostEqual(temperatures[-1], 2.0)
+        self.assertTrue(np.all(np.diff(temperatures) < 0.0))
+        self.assertTrue(np.allclose(np.diff(np.log(temperatures)), np.diff(np.log(temperatures))[0]))
+
+    def test_reduced_susceptibility_uses_total_magnetization_fluctuations(self):
+        chi = spin1_chain_ft.reduced_susceptibility_from_moments(
+            beta_mev_inv=2.0,
+            n_sites=4,
+            mz=1.0,
+            mz2=5.0,
+        )
 
         self.assertEqual(chi, 2.0)
 
-    def test_zero_beta_reports_zero_susceptibility(self):
-        chi = spin1_chain_ft.susceptibility_from_moments(beta=0.0, n_sites=4, mz=1.0, mz2=5.0)
+    def test_molar_susceptibility_uses_si_prefactor_and_g_squared(self):
+        chi_g2 = spin1_chain_ft.molar_susceptibility_from_reduced(1.0, g_factor=2.0)
+        chi_g4 = spin1_chain_ft.molar_susceptibility_from_reduced(1.0, g_factor=4.0)
+        expected = (
+            spin1_chain_ft.VACUUM_PERMEABILITY
+            * spin1_chain_ft.AVOGADRO_CONSTANT
+            * (2.0 * spin1_chain_ft.BOHR_MAGNETON_J_PER_T) ** 2
+            / spin1_chain_ft.MEV_TO_JOULE
+        )
 
-        self.assertEqual(chi, 0.0)
+        self.assertAlmostEqual(chi_g2, expected, places=18)
+        self.assertAlmostEqual(chi_g4 / chi_g2, 4.0, places=14)
+
+    def test_physical_unit_helpers_reject_invalid_inputs(self):
+        with self.assertRaisesRegex(ValueError, "temperature_k must be positive"):
+            spin1_chain_ft.beta_from_temperature_kelvin(0.0)
+        with self.assertRaisesRegex(ValueError, "maximum_k must be greater than minimum_k"):
+            spin1_chain_ft.temperature_grid_kelvin(10.0, 10.0, 5)
+        with self.assertRaisesRegex(ValueError, "points must be at least 2"):
+            spin1_chain_ft.temperature_grid_kelvin(2.0, 1200.0, 1)
+        with self.assertRaisesRegex(ValueError, "g_factor must be positive"):
+            spin1_chain_ft.molar_susceptibility_from_reduced(1.0, g_factor=0.0)
 
     def test_magnetization_moments_sum_sites_and_correlations(self):
         calls = []
