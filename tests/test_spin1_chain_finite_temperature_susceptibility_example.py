@@ -25,6 +25,19 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
         self.assertAlmostEqual(beta, 0.02320903624349117, delta=5.0e-17)
         self.assertAlmostEqual(spin1_chain_ft.temperature_kelvin_from_beta(beta), 500.0, places=12)
 
+    def test_extremely_small_positive_temperature_conversion_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "finite positive beta"):
+            spin1_chain_ft.beta_from_temperature_kelvin(1.0e-308)
+
+    def test_extremely_small_positive_beta_conversion_is_rejected(self):
+        try:
+            spin1_chain_ft.temperature_kelvin_from_beta(1.0e-323)
+        except Exception as exc:
+            self.assertIsInstance(exc, ValueError)
+            self.assertRegex(str(exc), "finite positive temperature")
+        else:
+            self.fail("expected an extremely small beta to be rejected")
+
     def test_temperature_grid_is_logarithmic_and_descending(self):
         temperatures = spin1_chain_ft.temperature_grid_kelvin(2.0, 1200.0, 5)
 
@@ -214,6 +227,15 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
             spin1_chain_ft.temperature_kelvin_from_beta(5.0),
             places=12,
         )
+
+    def test_legacy_tiny_beta_max_exits_through_argparse(self):
+        try:
+            spin1_chain_ft.parse_args(["--beta-max", "1e-323"])
+        except BaseException as exc:
+            self.assertIsInstance(exc, SystemExit)
+            self.assertEqual(exc.code, 2)
+        else:
+            self.fail("expected argparse to reject an extremely small --beta-max")
 
     def test_cli_rejects_conflicting_low_temperature_bounds(self):
         with self.assertRaises(SystemExit):
@@ -445,6 +467,18 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "g_factor must be positive"):
                 spin1_chain_ft.run_case_scan(
                     "with", FakeModel(), 2.0, 1200.0, 10, 0.01, 32, 1.0e-7, 0.0
+                )
+
+        require_tenpy.assert_not_called()
+
+    def test_run_case_scan_rejects_non_finite_target_beta_before_tenpy(self):
+        class FakeModel:
+            n_sites = 4
+
+        with patch.object(spin1_chain_ft, "_require_tenpy_purification") as require_tenpy:
+            with self.assertRaisesRegex(ValueError, "finite positive beta"):
+                spin1_chain_ft.run_case_scan(
+                    "with", FakeModel(), 1.0e-308, 2.0e-308, 2, 0.01, 32, 1.0e-7, 2.0
                 )
 
         require_tenpy.assert_not_called()

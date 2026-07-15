@@ -69,12 +69,18 @@ def _validate_positive_real(value: object, name: str) -> float:
 
 def beta_from_temperature_kelvin(temperature_k: float) -> float:
     temperature_k = _validate_positive_real(temperature_k, "temperature_k")
-    return 1.0 / (K_B_MEV_PER_K * temperature_k)
+    beta_mev_inv = (1.0 / temperature_k) / K_B_MEV_PER_K
+    if not np.isfinite(beta_mev_inv) or beta_mev_inv <= 0.0:
+        raise ValueError("temperature_k must convert to a finite positive beta_mev_inv")
+    return beta_mev_inv
 
 
 def temperature_kelvin_from_beta(beta_mev_inv: float) -> float:
     beta_mev_inv = _validate_positive_real(beta_mev_inv, "beta_mev_inv")
-    return 1.0 / (K_B_MEV_PER_K * beta_mev_inv)
+    temperature_k = (1.0 / beta_mev_inv) / K_B_MEV_PER_K
+    if not np.isfinite(temperature_k) or temperature_k <= 0.0:
+        raise ValueError("beta_mev_inv must convert to a finite positive temperature_k")
+    return temperature_k
 
 
 def temperature_grid_kelvin(minimum_k: float, maximum_k: float, points: int) -> list[float]:
@@ -260,6 +266,10 @@ def run_case_scan(
     chi_max = _validate_positive_integer(chi_max, "chi_max")
     svd_min = _validate_non_negative_real(svd_min, "svd_min")
     g_factor = _validate_positive_real(g_factor, "g_factor")
+    temperature_targets = [
+        (temperature_k, beta_from_temperature_kelvin(temperature_k))
+        for temperature_k in temperatures
+    ]
 
     PurificationApplyMPO, PurificationMPS = _require_tenpy_purification()
     tenpy_model = model.build_model()
@@ -273,8 +283,7 @@ def run_case_scan(
     rows = []
     engine = None
     current_beta = 0.0
-    for temperature_k in temperatures:
-        target_beta = beta_from_temperature_kelvin(temperature_k)
+    for temperature_k, target_beta in temperature_targets:
         while current_beta < target_beta:
             previous_beta = current_beta
             remaining_beta = target_beta - previous_beta
