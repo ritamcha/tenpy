@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import unittest
+import warnings
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -39,13 +40,31 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
             self.fail("expected an extremely small beta to be rejected")
 
     def test_temperature_grid_is_logarithmic_and_descending(self):
-        temperatures = spin1_chain_ft.temperature_grid_kelvin(2.0, 1200.0, 5)
+        temperatures = spin1_chain_ft.temperature_grid_kelvin(2.0, 1200.0, 150)
 
-        self.assertEqual(len(temperatures), 5)
+        self.assertEqual(len(temperatures), 150)
         self.assertAlmostEqual(temperatures[0], 1200.0)
         self.assertAlmostEqual(temperatures[-1], 2.0)
         self.assertTrue(np.all(np.diff(temperatures) < 0.0))
         self.assertTrue(np.allclose(np.diff(np.log(temperatures)), np.diff(np.log(temperatures))[0]))
+
+    def test_temperature_grid_handles_adjacent_floats_near_maximum_without_warnings(self):
+        minimum_k = np.nextafter(sys.float_info.max, 0.0)
+        maximum_k = sys.float_info.max
+
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
+            temperatures = spin1_chain_ft.temperature_grid_kelvin(minimum_k, maximum_k, 150)
+
+        self.assertEqual(caught_warnings, [])
+        self.assertEqual(len(temperatures), 150)
+        self.assertEqual(temperatures[0], maximum_k)
+        self.assertEqual(temperatures[-1], minimum_k)
+        self.assertTrue(np.all(np.isfinite(temperatures)))
+        self.assertTrue(np.all(np.asarray(temperatures) > 0.0))
+        self.assertTrue(np.all(np.asarray(temperatures) >= minimum_k))
+        self.assertTrue(np.all(np.asarray(temperatures) <= maximum_k))
+        self.assertTrue(np.all(np.diff(temperatures) <= 0.0))
 
     def test_reduced_susceptibility_uses_total_magnetization_fluctuations(self):
         chi = spin1_chain_ft.reduced_susceptibility_from_moments(
@@ -63,6 +82,15 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
 
         self.assertAlmostEqual(chi_g2, 1.6249705324481475e-6, delta=5.0e-21)
         self.assertAlmostEqual(chi_g4 / chi_g2, 4.0, places=14)
+
+    def test_molar_susceptibility_rejects_unrepresentable_g_prefactor(self):
+        try:
+            spin1_chain_ft.molar_susceptibility_from_reduced(1.0, g_factor=1.0e200)
+        except Exception as exc:
+            self.assertIsInstance(exc, ValueError)
+            self.assertRegex(str(exc), "g_factor.*prefactor")
+        else:
+            self.fail("expected an unrepresentable g-dependent prefactor to be rejected")
 
     def test_physical_unit_helpers_reject_invalid_inputs(self):
         with self.assertRaisesRegex(ValueError, "temperature_k must be positive"):
@@ -468,6 +496,23 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
                 spin1_chain_ft.run_case_scan(
                     "with", FakeModel(), 2.0, 1200.0, 10, 0.01, 32, 1.0e-7, 0.0
                 )
+
+        require_tenpy.assert_not_called()
+
+    def test_run_case_scan_rejects_unrepresentable_g_prefactor_before_tenpy(self):
+        class FakeModel:
+            n_sites = 4
+
+        with patch.object(spin1_chain_ft, "_require_tenpy_purification") as require_tenpy:
+            try:
+                spin1_chain_ft.run_case_scan(
+                    "with", FakeModel(), 2.0, 1200.0, 10, 0.01, 32, 1.0e-7, 1.0e200
+                )
+            except Exception as exc:
+                self.assertIsInstance(exc, ValueError)
+                self.assertRegex(str(exc), "g_factor.*prefactor")
+            else:
+                self.fail("expected an unrepresentable g-dependent prefactor to be rejected")
 
         require_tenpy.assert_not_called()
 

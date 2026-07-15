@@ -91,7 +91,41 @@ def temperature_grid_kelvin(minimum_k: float, maximum_k: float, points: int) -> 
         raise ValueError("maximum_k must be greater than minimum_k")
     if points < 2:
         raise ValueError("points must be at least 2")
-    return [float(value) for value in np.geomspace(maximum_k, minimum_k, points)]
+
+    log_minimum_k = np.log(minimum_k)
+    log_maximum_k = np.log(maximum_k)
+    log_range = log_minimum_k - log_maximum_k
+    temperatures = []
+    for fraction in np.linspace(0.0, 1.0, points):
+        if fraction == 0.0:
+            temperatures.append(maximum_k)
+            continue
+        if fraction == 1.0:
+            temperatures.append(minimum_k)
+            continue
+        with np.errstate(over="raise", under="ignore", invalid="raise"):
+            temperature_k = np.exp(log_maximum_k + float(fraction) * log_range)
+        temperature_k = min(maximum_k, max(minimum_k, temperature_k))
+        if not np.isfinite(temperature_k) or temperature_k <= 0.0:
+            raise ValueError("temperature grid must contain finite positive values")
+        temperatures.append(float(temperature_k))
+
+    temperatures[0] = maximum_k
+    temperatures[-1] = minimum_k
+    if any(
+        not np.isfinite(temperature_k)
+        or temperature_k <= 0.0
+        or temperature_k < minimum_k
+        or temperature_k > maximum_k
+        for temperature_k in temperatures
+    ):
+        raise ValueError("temperature grid must contain finite positive values within bounds")
+    if any(
+        later_temperature_k > temperature_k
+        for temperature_k, later_temperature_k in zip(temperatures, temperatures[1:])
+    ):
+        raise ValueError("temperature grid must be non-increasing")
+    return temperatures
 
 
 def reduced_susceptibility_from_moments(
@@ -107,16 +141,37 @@ def reduced_susceptibility_from_moments(
     return beta_mev_inv * (mz2 - mz * mz) / n_sites
 
 
-def molar_susceptibility_from_reduced(chi_reduced_mev_inv: float, g_factor: float) -> float:
-    chi_reduced_mev_inv = _validate_finite_real(chi_reduced_mev_inv, "chi_reduced_mev_inv")
+def _molar_susceptibility_prefactor(g_factor: float) -> float:
     g_factor = _validate_positive_real(g_factor, "g_factor")
-    prefactor = (
+    prefactor_per_g_squared = (
         VACUUM_PERMEABILITY
         * AVOGADRO_CONSTANT
-        * (g_factor * BOHR_MAGNETON_J_PER_T) ** 2
+        * BOHR_MAGNETON_J_PER_T
+        * BOHR_MAGNETON_J_PER_T
         / MEV_TO_JOULE
     )
-    return prefactor * chi_reduced_mev_inv
+    prefactor = g_factor * (prefactor_per_g_squared * g_factor)
+    if not np.isfinite(prefactor) or prefactor <= 0.0:
+        raise ValueError("g_factor must produce a finite positive SI molar prefactor")
+    return prefactor
+
+
+def _molar_susceptibility_from_prefactor(
+    chi_reduced_mev_inv: float,
+    molar_prefactor: float,
+) -> float:
+    chi_reduced_mev_inv = _validate_finite_real(chi_reduced_mev_inv, "chi_reduced_mev_inv")
+    chi_molar = molar_prefactor * chi_reduced_mev_inv
+    if not np.isfinite(chi_molar):
+        raise ValueError("molar susceptibility must be finite")
+    return chi_molar
+
+
+def molar_susceptibility_from_reduced(chi_reduced_mev_inv: float, g_factor: float) -> float:
+    return _molar_susceptibility_from_prefactor(
+        chi_reduced_mev_inv,
+        _molar_susceptibility_prefactor(g_factor),
+    )
 
 
 def _validate_choice(value: object, name: str, choices: tuple[str, ...]) -> str:
@@ -225,6 +280,7 @@ def _measurement_row(
     n_sites: int,
     psi,
     g_factor: float,
+    molar_prefactor: float,
 ) -> dict[str, float | int | str]:
     mz, mz2 = magnetization_moments(psi)
     chi_reduced = reduced_susceptibility_from_moments(beta_mev_inv, n_sites, mz, mz2)
@@ -233,7 +289,10 @@ def _measurement_row(
         "beta_meV_inv": beta_mev_inv,
         "temperature_K": temperature_k,
         "chi_reduced_meV_inv": chi_reduced,
-        "chi_molar_m3_per_mol": molar_susceptibility_from_reduced(chi_reduced, g_factor),
+        "chi_molar_m3_per_mol": _molar_susceptibility_from_prefactor(
+            chi_reduced,
+            molar_prefactor,
+        ),
         "g_factor": g_factor,
         "mz": mz,
         "mz2": mz2,
@@ -266,6 +325,7 @@ def run_case_scan(
     chi_max = _validate_positive_integer(chi_max, "chi_max")
     svd_min = _validate_non_negative_real(svd_min, "svd_min")
     g_factor = _validate_positive_real(g_factor, "g_factor")
+    molar_prefactor = _molar_susceptibility_prefactor(g_factor)
     temperature_targets = [
         (temperature_k, beta_from_temperature_kelvin(temperature_k))
         for temperature_k in temperatures
@@ -308,6 +368,7 @@ def run_case_scan(
             model.n_sites,
             psi,
             g_factor,
+            molar_prefactor,
         ))
 
     rows.reverse()
