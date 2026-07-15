@@ -359,7 +359,7 @@ def run_susceptibility_scan(
     return rows
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-sites", type=int, default=12, help="Number of spin-1 sites.")
     parser.add_argument("--j", type=float, default=-16.1, help="J in H = -2 J sum_i S_i.S_{i+1}.")
@@ -372,8 +372,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--bc", choices=("open", "periodic"), default="open", help="Lattice boundary condition.")
     parser.add_argument("--case", choices=("with", "without", "both"), default="with")
-    parser.add_argument("--beta-max", type=float, default=5.0, help="Maximum inverse temperature beta.")
-    parser.add_argument("--dt", type=float, default=0.05, help="Imaginary-time step; beta advances by 2*dt.")
+    parser.add_argument("--temperature-min-k", type=float, default=None, help="Minimum temperature in K.")
+    parser.add_argument("--temperature-max-k", type=float, default=1200.0, help="Maximum temperature in K.")
+    parser.add_argument("--temperature-points", type=int, default=150, help="Number of logarithmic temperatures.")
+    parser.add_argument(
+        "--beta-max",
+        type=float,
+        default=None,
+        help="Deprecated alternative to --temperature-min-k, in meV^-1.",
+    )
+    parser.add_argument(
+        "--dt",
+        type=float,
+        default=0.01,
+        help="Maximum purification half-step in meV^-1.",
+    )
+    parser.add_argument("--g-factor", type=float, default=2.0, help="Lande g-factor along z.")
     parser.add_argument("--chi-max", type=int, default=100, help="Maximum purification bond dimension.")
     parser.add_argument("--svd-min", type=float, default=1.0e-8, help="Minimum singular value retained.")
     parser.add_argument(
@@ -381,11 +395,27 @@ def parse_args() -> argparse.Namespace:
         default="spin1_chain_susceptibility_vs_temperature.csv",
         help="Output CSV path.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--plot",
+        default="spin1_chain_susceptibility_vs_temperature.png",
+        help="Output PNG path.",
+    )
+    args = parser.parse_args(argv)
+    if args.temperature_min_k is not None and args.beta_max is not None:
+        parser.error("--temperature-min-k cannot be combined with --beta-max")
+    if args.temperature_min_k is None:
+        if args.beta_max is None:
+            args.temperature_min_k = 2.0
+        else:
+            try:
+                args.temperature_min_k = temperature_kelvin_from_beta(args.beta_max)
+            except ValueError as exc:
+                parser.error(str(exc))
+    return args
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     rows = run_susceptibility_scan(
         case=args.case,
         n_sites=args.n_sites,
@@ -393,13 +423,18 @@ def main() -> None:
         dz=args.dz,
         dpp=args.dpp,
         bc=args.bc,
-        beta_max=args.beta_max,
+        temperature_min_k=args.temperature_min_k,
+        temperature_max_k=args.temperature_max_k,
+        temperature_points=args.temperature_points,
         dt=args.dt,
         chi_max=args.chi_max,
         svd_min=args.svd_min,
+        g_factor=args.g_factor,
     )
     write_susceptibility_csv(rows, args.csv)
+    write_susceptibility_plot(rows, args.plot)
     print(f"Wrote {args.csv}")
+    print(f"Wrote {args.plot}")
 
 
 if __name__ == "__main__":

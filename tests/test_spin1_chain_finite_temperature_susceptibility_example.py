@@ -186,12 +186,81 @@ class Spin1ChainFiniteTemperatureSusceptibilityTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "python -m pip install matplotlib"):
                 spin1_chain_ft._require_matplotlib_pyplot()
 
-    def test_default_cli_values(self):
-        with patch.object(sys, "argv", ["spin1_chain_finite_temperature_susceptibility.py"]):
-            args = spin1_chain_ft.parse_args()
+    def test_default_cli_values_use_kelvin_si_grid_and_plot(self):
+        args = spin1_chain_ft.parse_args([])
 
         self.assertEqual(args.case, "with")
+        self.assertEqual(args.temperature_min_k, 2.0)
+        self.assertEqual(args.temperature_max_k, 1200.0)
+        self.assertEqual(args.temperature_points, 150)
+        self.assertEqual(args.dt, 0.01)
+        self.assertEqual(args.g_factor, 2.0)
         self.assertEqual(args.csv, "spin1_chain_susceptibility_vs_temperature.csv")
+        self.assertEqual(args.plot, "spin1_chain_susceptibility_vs_temperature.png")
+
+    def test_legacy_beta_max_sets_low_temperature_endpoint(self):
+        args = spin1_chain_ft.parse_args(["--beta-max", "5.0"])
+
+        self.assertAlmostEqual(
+            args.temperature_min_k,
+            spin1_chain_ft.temperature_kelvin_from_beta(5.0),
+            places=12,
+        )
+
+    def test_cli_rejects_conflicting_low_temperature_bounds(self):
+        with self.assertRaises(SystemExit):
+            spin1_chain_ft.parse_args([
+                "--temperature-min-k",
+                "2.0",
+                "--beta-max",
+                "5.0",
+            ])
+
+    def test_main_writes_csv_and_png(self):
+        rows = [{
+            "case": "with",
+            "beta_meV_inv": 1.0,
+            "temperature_K": 11.604518121550082,
+            "chi_reduced_meV_inv": 1.0,
+            "chi_molar_m3_per_mol": 1.0e-6,
+            "g_factor": 2.0,
+            "mz": 0.0,
+            "mz2": 12.0,
+            "n_sites": 12,
+        }]
+
+        with patch.object(spin1_chain_ft, "run_susceptibility_scan", return_value=rows) as run_scan, patch.object(
+            spin1_chain_ft,
+            "write_susceptibility_csv",
+        ) as write_csv, patch.object(spin1_chain_ft, "write_susceptibility_plot") as write_plot:
+            spin1_chain_ft.main([
+                "--temperature-min-k",
+                "2",
+                "--temperature-max-k",
+                "1200",
+                "--csv",
+                "result.csv",
+                "--plot",
+                "result.png",
+            ])
+
+        run_scan.assert_called_once_with(
+            case="with",
+            n_sites=12,
+            j_iso=-16.1,
+            dz=0.379,
+            dpp=-0.017,
+            bc="open",
+            temperature_min_k=2.0,
+            temperature_max_k=1200.0,
+            temperature_points=150,
+            dt=0.01,
+            chi_max=100,
+            svd_min=1.0e-8,
+            g_factor=2.0,
+        )
+        write_csv.assert_called_once_with(rows, "result.csv")
+        write_plot.assert_called_once_with(rows, "result.png")
 
     def test_run_case_scan_reaches_temperature_targets_with_bounded_mpo_steps(self):
         class FakeHMPO:
